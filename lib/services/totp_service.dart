@@ -7,13 +7,27 @@ class TotpService {
   static const String _base32Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
   /// Generates a current 6-digit TOTP code for a given Base32 secret.
+  /// Also supports full otpauth:// URI strings!
   /// Returns null if secret is empty or invalid.
   static String? generateCode(String rawSecret, {int? timeMs, int intervalSeconds = 30}) {
-    final cleanSecret = rawSecret.trim().replaceAll(' ', '').replaceAll('-', '').toUpperCase();
+    String clean = rawSecret.trim();
+    if (clean.isEmpty) return null;
+
+    // Check if input is a full otpauth URI (e.g. otpauth://totp/...?secret=JBSWY3DPEHPK3PXP)
+    if (clean.toLowerCase().startsWith('otpauth://')) {
+      final uri = Uri.tryParse(clean);
+      if (uri != null && uri.queryParameters.containsKey('secret')) {
+        clean = uri.queryParameters['secret']!;
+      }
+    }
+
+    final cleanSecret = clean.replaceAll(' ', '').replaceAll('-', '').toUpperCase();
     if (cleanSecret.isEmpty) return null;
 
     try {
       final keyBytes = _decodeBase32(cleanSecret);
+      if (keyBytes.isEmpty) return null;
+
       final int currentSec = (timeMs ?? DateTime.now().millisecondsSinceEpoch) ~/ 1000;
       final int counter = currentSec ~/ intervalSeconds;
 

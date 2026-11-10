@@ -54,7 +54,7 @@ class UpdateInfo {
 class UpdateService {
   static const String repoOwner = 'Wyclaew';
   static const String repoName = 'multipad';
-  static const String currentAppVersion = '1.0.0';
+  static const String currentAppVersion = '1.0.3';
 
   /// Queries GitHub Releases API to check if a newer release exists.
   static Future<UpdateInfo?> checkForUpdate() async {
@@ -102,7 +102,7 @@ class UpdateService {
     }
   }
 
-  /// Compares semantic version strings e.g. "1.0.1" vs "1.0.0"
+  /// Compares semantic version strings e.g. "1.0.3" vs "1.0.2"
   static bool _isVersionNewer(String latest, String current) {
     try {
       final lParts = latest.split('.').map((e) => int.tryParse(e) ?? 0).toList();

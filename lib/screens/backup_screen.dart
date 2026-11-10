@@ -73,7 +73,7 @@ class _BackupScreenState extends State<BackupScreen> with SingleTickerProviderSt
         );
       }
     } finally {
-      setState(() => _isExporting = false);
+      if (mounted) setState(() => _isExporting = false);
     }
   }
 
@@ -120,7 +120,7 @@ class _BackupScreenState extends State<BackupScreen> with SingleTickerProviderSt
         );
       }
     } finally {
-      setState(() => _isImporting = false);
+      if (mounted) setState(() => _isImporting = false);
     }
   }
 

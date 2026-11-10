@@ -37,9 +37,7 @@ class TrashScreen extends StatelessWidget {
                 );
 
                 if (confirmed == true) {
-                  for (final item in trashItems) {
-                    await vault.deleteItem(item.id);
-                  }
+                  await vault.emptyTrash();
                 }
               },
             ),

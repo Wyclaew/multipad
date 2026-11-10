@@ -42,9 +42,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _checkForUpdate() async {
     setState(() => _isCheckingUpdate = true);
     final updateInfo = await UpdateService.checkForUpdate();
-    setState(() => _isCheckingUpdate = false);
-
     if (!mounted) return;
+    setState(() => _isCheckingUpdate = false);
 
     if (updateInfo == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -94,7 +93,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onPressed: () {
                 Navigator.of(ctx).pop();
                 ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('${asset?.name ?? 'Güncelleme'} indiriliyor...')),
+                  SnackBar(content: Text('${asset?.name ?? 'Güncelleme'} indirme adresi: ${updateInfo.htmlUrl}')),
                 );
               },
             ),
@@ -151,6 +150,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('İptal')),
           FilledButton(
             onPressed: () {
+              if (currentController.text.isEmpty) {
+                ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Lütfen mevcut ana şifrenizi girin.')));
+                return;
+              }
               if (newController.text.length < 8) {
                 ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Yeni şifre en az 8 karakter olmalıdır.')));
                 return;
@@ -171,29 +174,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final auth = context.read<AuthProvider>();
       final vault = context.read<VaultProvider>();
 
-      try {
-        final newSalt = auth.cryptoService.generateSalt();
-        final newMasterKey = await auth.cryptoService.deriveMasterKey(newController.text, newSalt);
+      final currentPass = currentController.text;
+      final newPass = newController.text;
 
-        final currentItems = List.from(vault.allItems);
-        for (final item in currentItems) {
-          await vault.saveItem(item);
-        }
+      // Wipe controllers
+      currentController.clear();
+      newController.clear();
+      confirmController.clear();
 
-        if (auth.isBiometricEnabled) {
-          await auth.toggleBiometrics(false);
-          await auth.toggleBiometrics(true);
-        }
+      final success = await auth.changeMasterPassword(
+        currentPassword: currentPass,
+        newPassword: newPass,
+        vault: vault,
+      );
 
-        if (mounted) {
+      if (mounted) {
+        if (success) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Ana şifre başarıyla değiştirildi ve kasa güncellendi!'), backgroundColor: Colors.green),
+            const SnackBar(
+              content: Text('Ana şifre başarıyla değiştirildi ve kasa yeni anahtarla yeniden şifrelendi!'),
+              backgroundColor: Colors.green,
+            ),
           );
-        }
-      } catch (e) {
-        if (mounted) {
+        } else {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Şifre değiştirme hatası: $e'), backgroundColor: Colors.redAccent),
+            SnackBar(
+              content: Text(auth.errorMessage ?? 'Şifre değiştirilemedi.'),
+              backgroundColor: Colors.redAccent,
+            ),
           );
         }
       }
@@ -464,7 +472,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('MultiPad Vault v1.0.1', style: TextStyle(fontWeight: FontWeight.bold)),
+                          Text('MultiPad Vault v1.0.3', style: TextStyle(fontWeight: FontWeight.bold)),
                           SizedBox(height: 2),
                           Text('Yapımcı: WycDev', style: TextStyle(fontSize: 13, color: Colors.blueAccent, fontWeight: FontWeight.w600)),
                         ],
@@ -492,7 +500,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 context: context,
                 builder: (ctx) => AlertDialog(
                   title: const Text('Çıkış Yap'),
-                  content: const Text('Kasadan çıkmak istediğinize emin misiniz?'),
+                  content: const Text('Kasadan çıkmak istediğinize emin misiniz? Biyometrik oturumunuz ve anahtarınız bellekten temizlenecektir.'),
                   actions: [
                     TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Vazgeç')),
                     FilledButton(

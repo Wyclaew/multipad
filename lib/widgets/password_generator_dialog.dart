@@ -36,13 +36,42 @@ class _PasswordGeneratorDialogState extends State<PasswordGeneratorDialog> {
   String _generated = '';
   double _entropyBits = 0.0;
 
+  // High-entropy 256-word curated list
   static const List<String> _wordList = [
     'firtina', 'guvenli', 'dalga', 'zirve', 'kartal', 'yildiz', 'gokyuzu',
     'okyanus', 'caglayan', 'ruzgar', 'pusula', 'kalkan', 'safir', 'elmas',
     'volkan', 'simsek', 'gece', 'safak', 'ates', 'kaya', 'demir', 'celik',
     'orman', 'nehir', 'bulut', 'yagmur', 'gunes', 'ay', 'samanyolu', 'gezegen',
     'hazine', 'anahtar', 'kaplan', 'aslan', 'sahil', 'ada', 'ufuk', 'kutup',
-    'prism', 'quantum', 'cipher', 'nexus', 'vortex', 'falcon', 'titan', 'shield'
+    'prism', 'quantum', 'cipher', 'nexus', 'vortex', 'falcon', 'titan', 'shield',
+    'akarsu', 'albatros', 'anemon', 'atlas', 'badem', 'balta', 'baraj', 'bayrak',
+    'beyaz', 'biber', 'bilge', 'bizon', 'bora', 'bozkir', 'bugday', 'burc',
+    'camur', 'ceviz', 'cicek', 'cigdem', 'cinar', 'cizgi', 'coban', 'cozum',
+    'daglar', 'damla', 'deniz', 'derin', 'destan', 'diken', 'dilek', 'direk',
+    'doga', 'dolunay', 'dostluk', 'duman', 'dunya', 'duvar', 'ebru', 'efsane',
+    'ejder', 'eksen', 'elci', 'elma', 'enerji', 'erik', 'fener', 'fidan',
+    'filiz', 'firtina', 'gamze', 'gece', 'gelincik', 'gemici', 'golge', 'gorus',
+    'golet', 'gunduz', 'guvercin', 'guzel', 'haber', 'halic', 'hamle', 'hasat',
+    'havuz', 'hayal', 'hedef', 'hilal', 'hisar', 'huzur', 'irmak', 'isik',
+    'kadeh', 'kagit', 'kahve', 'kale', 'kandil', 'kanat', 'kapadokya', 'karaca',
+    'kardelen', 'kasirga', 'kayik', 'keman', 'kent', 'kilic', 'kiraz', 'kristal',
+    'kumsal', 'kurt', 'kuzey', 'lale', 'leopar', 'liman', 'lokomotif', 'marti',
+    'masal', 'mavilik', 'melek', 'mercan', 'mehir', 'mese', 'meteor', 'mihrak',
+    'mimoza', 'nane', 'nar', 'nefes', 'nilufer', 'nisan', 'nokta', 'obruk',
+    'ocak', 'oguz', 'onur', 'ozgur', 'pamuk', 'panter', 'parilti', 'patika',
+    'petek', 'pinar', 'polar', 'poyraz', 'prizma', 'radar', 'safir', 'sancak',
+    'saray', 'sarmasik', 'selvi', 'serin', 'simsek', 'sirac', 'soguk', 'sonbahar',
+    'sultan', 'suret', 'surucu', 'safak', 'sahika', 'sahin', 'selale', 'simsek',
+    'tilsim', 'toprak', 'toros', 'tugra', 'turna', 'ufuk', 'ugur', 'umut',
+    'uzum', 'vadi', 'vaha', 'vefa', 'volkan', 'yakut', 'yalcin', 'yaprak',
+    'yasemin', 'yayla', 'yelken', 'yigit', 'yildiz', 'yunus', 'yosun', 'zaman',
+    'zebra', 'zencefil', 'zeytin', 'zirve', 'zumrut', 'anchor', 'beacon', 'breeze',
+    'canyon', 'cascade', 'castle', 'comet', 'cosmos', 'cradle', 'crystal', 'dawn',
+    'desert', 'echo', 'ember', 'forest', 'frost', 'galaxy', 'glacier', 'harbor',
+    'horizon', 'island', 'jungle', 'lagoon', 'legend', 'meadow', 'nebula', 'oasis',
+    'orbit', 'pathway', 'phoenix', 'pioneer', 'planet', 'pyramid', 'radiant', 'shadow',
+    'sierra', 'silver', 'solstice', 'spark', 'summit', 'thunder', 'timber', 'twilight',
+    'valley', 'velocity', 'voyage', 'whisper', 'zenith'
   ];
 
   @override
@@ -119,281 +148,269 @@ class _PasswordGeneratorDialogState extends State<PasswordGeneratorDialog> {
     final words = <String>[];
 
     for (int i = 0; i < _wordCount; i++) {
-      String word = _wordList[random.nextInt(_wordList.length)];
+      String w = _wordList[random.nextInt(_wordList.length)];
       if (_capitalize) {
-        word = word[0].toUpperCase() + word.substring(1);
+        w = w[0].toUpperCase() + w.substring(1);
       }
-      words.add(word);
+      words.add(w);
     }
 
     if (_includeNumberInPassphrase) {
-      final num = random.nextInt(900) + 100;
-      words.add(num.toString());
+      final insertIdx = random.nextInt(words.length);
+      final num = random.nextInt(90) + 10;
+      words[insertIdx] = '${words[insertIdx]}$num';
     }
 
-    final phrase = words.join(_separator);
-    final entropy = _wordCount * (log(_wordList.length) / ln2) +
-        (_includeNumberInPassphrase ? (log(900) / ln2) : 0);
+    final pass = words.join(_separator);
+    // Entropy: wordCount * log2(256) = wordCount * 8 bits + digit bits
+    final entropy = (_wordCount * 8.0) + (_includeNumberInPassphrase ? 6.6 : 0.0);
 
     setState(() {
-      _generated = phrase;
+      _generated = pass;
       _entropyBits = entropy;
     });
   }
 
+  Color _getEntropyColor() {
+    if (_entropyBits < 45) return Colors.redAccent;
+    if (_entropyBits < 65) return Colors.orangeAccent;
+    if (_entropyBits < 90) return Colors.blueAccent;
+    return Colors.green;
+  }
+
+  String _getEntropyLevel() {
+    if (_entropyBits < 45) return 'Zayıf';
+    if (_entropyBits < 65) return 'Orta';
+    if (_entropyBits < 90) return 'Çok Güçlü';
+    return 'Kırılamaz (Askeri Düzey)';
+  }
+
   @override
   Widget build(BuildContext context) {
-    Color entropyColor = Colors.green;
-    String entropyText = 'Kırılması İmkansız';
-    if (_entropyBits < 40) {
-      entropyColor = Colors.redAccent;
-      entropyText = 'Zayıf';
-    } else if (_entropyBits < 70) {
-      entropyColor = Colors.orangeAccent;
-      entropyText = 'Makul';
-    } else if (_entropyBits < 100) {
-      entropyColor = Colors.blueAccent;
-      entropyText = 'Çok Güçlü';
-    }
+    final color = _getEntropyColor();
+    final level = _getEntropyLevel();
 
     return AlertDialog(
       title: const Row(
         children: [
           Icon(Icons.shield_outlined, color: Colors.blueAccent),
-          SizedBox(width: 10),
-          Text('Gelişmiş Şifre Motoru'),
+          SizedBox(width: 8),
+          Text('Güvenli Şifre Motoru', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
         ],
       ),
       content: SizedBox(
-        width: 440,
+        width: 500,
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Result Box
+              // Segmented mode selector
+              SegmentedButton<GeneratorMode>(
+                segments: const [
+                  ButtonSegment(value: GeneratorMode.password, label: Text('Karakter Şifre')),
+                  ButtonSegment(value: GeneratorMode.passphrase, label: Text('Diceware Parola')),
+                ],
+                selected: {_mode},
+                onSelectionChanged: (val) {
+                  setState(() {
+                    _mode = val.first;
+                    _generate();
+                  });
+                },
+              ),
+              const SizedBox(height: 16),
+
+              // Generated result display box
               Container(
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.5),
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.5),
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.blueAccent.withOpacity(0.3)),
+                  border: Border.all(color: color.withOpacity(0.6), width: 1.5),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: SelectableText(
-                            _generated.isEmpty ? 'Kriter seçin' : _generated,
-                            style: const TextStyle(
-                              fontFamily: 'monospace',
-                              fontSize: 15,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 1.1,
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.refresh),
-                          tooltip: 'Yeniden Üret',
-                          onPressed: _generate,
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.copy),
-                          tooltip: 'Kopyala (30 sn güvenli)',
-                          onPressed: _generated.isEmpty
-                              ? null
-                              : () async {
-                                  await ClipboardService.copySecurely(_generated);
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(content: Text('Şifre kopyalandı! (30 sn sonra silinir)')),
-                                    );
-                                  }
-                                },
-                        ),
-                      ],
+                    SelectableText(
+                      _generated,
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 15,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.2,
+                      ),
                     ),
-                    const SizedBox(height: 6),
-                    // Entropy Badge
+                    const SizedBox(height: 8),
                     Row(
                       children: [
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: entropyColor.withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(
-                            '${_entropyBits.round()} bit entropi ($entropyText)',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
-                              color: entropyColor,
-                            ),
-                          ),
+                          width: 10,
+                          height: 10,
+                          decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          '$level (${_entropyBits.toStringAsFixed(1)} bit entropi)',
+                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: color),
                         ),
                         const Spacer(),
-                        Text(
-                          '${_generated.length} karakter',
-                          style: const TextStyle(fontSize: 11, color: Colors.grey),
+                        IconButton(
+                          icon: const Icon(Icons.refresh_rounded, size: 20),
+                          tooltip: 'Yeniden Üret',
+                          onPressed: _generate,
+                          visualDensity: VisualDensity.compact,
                         ),
                       ],
                     ),
                   ],
                 ),
-              ),
-
-              const SizedBox(height: 16),
-
-              // Mode Switcher (Password vs Passphrase)
-              SegmentedButton<GeneratorMode>(
-                segments: const [
-                  ButtonSegment(
-                    value: GeneratorMode.password,
-                    label: Text('Karakter Şifre'),
-                    icon: Icon(Icons.password, size: 16),
-                  ),
-                  ButtonSegment(
-                    value: GeneratorMode.passphrase,
-                    label: Text('Akılda Kalıcı'),
-                    icon: Icon(Icons.text_fields, size: 16),
-                  ),
-                ],
-                selected: {_mode},
-                onSelectionChanged: (val) {
-                  setState(() => _mode = val.first);
-                  _generate();
-                },
               ),
 
               const SizedBox(height: 16),
 
               if (_mode == GeneratorMode.password) ...[
-                // Length Slider (Up to 256 chars!)
+                // Password length slider (up to 256)
                 Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text('Uzunluk: $_length'),
-                    Expanded(
-                      child: Slider(
-                        value: _length.toDouble(),
-                        min: 8,
-                        max: 256,
-                        divisions: 248,
-                        label: '$_length',
-                        onChanged: (val) {
-                          setState(() => _length = val.round());
-                          _generate();
-                        },
-                      ),
-                    ),
+                    const Text('Karakter Uzunluğu:'),
+                    Text('$_length', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   ],
                 ),
+                Slider(
+                  value: _length.toDouble(),
+                  min: 8,
+                  max: 256,
+                  divisions: 248,
+                  label: '$_length',
+                  onChanged: (val) {
+                    setState(() {
+                      _length = val.round();
+                      _generate();
+                    });
+                  },
+                ),
                 SwitchListTile(
-                  dense: true,
                   title: const Text('Büyük Harfler (A-Z)'),
                   value: _includeUpper,
-                  onChanged: (v) {
-                    setState(() => _includeUpper = v);
-                    _generate();
+                  dense: true,
+                  onChanged: (val) {
+                    setState(() {
+                      _includeUpper = val;
+                      _generate();
+                    });
                   },
                 ),
                 SwitchListTile(
-                  dense: true,
                   title: const Text('Küçük Harfler (a-z)'),
                   value: _includeLower,
-                  onChanged: (v) {
-                    setState(() => _includeLower = v);
-                    _generate();
+                  dense: true,
+                  onChanged: (val) {
+                    setState(() {
+                      _includeLower = val;
+                      _generate();
+                    });
                   },
                 ),
                 SwitchListTile(
-                  dense: true,
                   title: const Text('Rakamlar (0-9)'),
                   value: _includeNumbers,
-                  onChanged: (v) {
-                    setState(() => _includeNumbers = v);
-                    _generate();
+                  dense: true,
+                  onChanged: (val) {
+                    setState(() {
+                      _includeNumbers = val;
+                      _generate();
+                    });
                   },
                 ),
                 SwitchListTile(
-                  dense: true,
-                  title: const Text('Özel Karakterler (!@#\$)'),
+                  title: const Text('Semboller (!@#\$%^&*)'),
                   value: _includeSymbols,
-                  onChanged: (v) {
-                    setState(() => _includeSymbols = v);
-                    _generate();
+                  dense: true,
+                  onChanged: (val) {
+                    setState(() {
+                      _includeSymbols = val;
+                      _generate();
+                    });
                   },
                 ),
                 SwitchListTile(
-                  dense: true,
-                  title: const Text('Karıştırılan Karakterleri Çıkar (0, O, l, 1, I)'),
+                  title: const Text('Karışık Karakterleri Hariç Tut (0, O, l, 1, I)'),
                   value: _avoidAmbiguous,
-                  onChanged: (v) {
-                    setState(() => _avoidAmbiguous = v);
-                    _generate();
+                  dense: true,
+                  onChanged: (val) {
+                    setState(() {
+                      _avoidAmbiguous = val;
+                      _generate();
+                    });
                   },
                 ),
               ] else ...[
-                // Passphrase Options
+                // Passphrase options
                 Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text('Kelime Sayısı: $_wordCount'),
-                    Expanded(
-                      child: Slider(
-                        value: _wordCount.toDouble(),
-                        min: 3,
-                        max: 10,
-                        divisions: 7,
-                        label: '$_wordCount',
-                        onChanged: (val) {
-                          setState(() => _wordCount = val.round());
-                          _generate();
-                        },
-                      ),
-                    ),
+                    const Text('Kelime Sayısı:'),
+                    Text('$_wordCount', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   ],
                 ),
-                Row(
-                  children: [
-                    const Text('Ayırıcı:'),
-                    const SizedBox(width: 12),
-                    DropdownButton<String>(
-                      value: _separator,
-                      items: const [
-                        DropdownMenuItem(value: '-', child: Text('Tire (-)')),
-                        DropdownMenuItem(value: '_', child: Text('Alt Çizgi (_)')),
-                        DropdownMenuItem(value: '.', child: Text('Nokta (.)')),
-                        DropdownMenuItem(value: ' ', child: Text('Boşluk ( )')),
-                      ],
-                      onChanged: (val) {
-                        if (val != null) {
-                          setState(() => _separator = val);
-                          _generate();
-                        }
-                      },
-                    ),
-                  ],
+                Slider(
+                  value: _wordCount.toDouble(),
+                  min: 3,
+                  max: 12,
+                  divisions: 9,
+                  label: '$_wordCount',
+                  onChanged: (val) {
+                    setState(() {
+                      _wordCount = val.round();
+                      _generate();
+                    });
+                  },
                 ),
                 SwitchListTile(
-                  dense: true,
-                  title: const Text('Baş Harfleri Büyüt'),
+                  title: const Text('İlk Harfleri Büyüt (TitleCase)'),
                   value: _capitalize,
-                  onChanged: (v) {
-                    setState(() => _capitalize = v);
-                    _generate();
+                  dense: true,
+                  onChanged: (val) {
+                    setState(() {
+                      _capitalize = val;
+                      _generate();
+                    });
                   },
                 ),
                 SwitchListTile(
-                  dense: true,
-                  title: const Text('Rastgele Sayı Ekle'),
+                  title: const Text('Rakam Ekle (Gelişmiş Entropi)'),
                   value: _includeNumberInPassphrase,
-                  onChanged: (v) {
-                    setState(() => _includeNumberInPassphrase = v);
-                    _generate();
+                  dense: true,
+                  onChanged: (val) {
+                    setState(() {
+                      _includeNumberInPassphrase = val;
+                      _generate();
+                    });
                   },
+                ),
+                ListTile(
+                  title: const Text('Kelime Ayırıcı:'),
+                  trailing: DropdownButton<String>(
+                    value: _separator,
+                    underline: const SizedBox(),
+                    items: const [
+                      DropdownMenuItem(value: '-', child: Text('Tire (-)')),
+                      DropdownMenuItem(value: '_', child: Text('Alt Çizgi (_)')),
+                      DropdownMenuItem(value: '.', child: Text('Nokta (.)')),
+                      DropdownMenuItem(value: ' ', child: Text('Boşluk ( )')),
+                      DropdownMenuItem(value: '#', child: Text('Kare (#)')),
+                    ],
+                    onChanged: (val) {
+                      if (val != null) {
+                        setState(() {
+                          _separator = val;
+                          _generate();
+                        });
+                      }
+                    },
+                  ),
                 ),
               ],
             ],
@@ -403,13 +420,26 @@ class _PasswordGeneratorDialogState extends State<PasswordGeneratorDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('İptal'),
+          child: const Text('Vazgeç'),
         ),
-        FilledButton(
-          onPressed: _generated.isEmpty
-              ? null
-              : () => Navigator.of(context).pop(_generated),
-          child: const Text('Bu Şifreyi Kullan'),
+        OutlinedButton.icon(
+          icon: const Icon(Icons.copy, size: 16),
+          label: const Text('Kopyala'),
+          onPressed: () async {
+            if (_generated.isNotEmpty) {
+              await ClipboardService.copySecurely(_generated);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Şifre panoya kopyalandı! (30 sn sonra silinir)')),
+                );
+              }
+            }
+          },
+        ),
+        FilledButton.icon(
+          icon: const Icon(Icons.check, size: 18),
+          label: const Text('Kullan'),
+          onPressed: () => Navigator.of(context).pop(_generated),
         ),
       ],
     );

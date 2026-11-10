@@ -4,6 +4,7 @@ import '../constants.dart';
 import '../services/biometric_service.dart';
 import '../services/crypto_service.dart';
 import '../services/supabase_service.dart';
+import 'vault_provider.dart';
 
 enum VaultLockStatus {
   needsSetup,       // Needs Supabase URL/Key configuration
@@ -103,6 +104,8 @@ class AuthProvider with ChangeNotifier {
   /// Sign up a new user with Master Password
   Future<bool> register({required String email, required String masterPassword}) async {
     _errorMessage = null;
+    final cleanEmail = email.trim().toLowerCase();
+
     try {
       final salt = _cryptoService.generateSalt();
       final derivedKey = await _cryptoService.deriveMasterKey(masterPassword, salt);
@@ -110,7 +113,7 @@ class AuthProvider with ChangeNotifier {
 
       if (SupabaseService.isInitialized) {
         await _supabaseService.signUp(
-          email: email,
+          email: cleanEmail,
           authPassword: authPassword,
           masterSalt: salt,
         );
@@ -118,10 +121,10 @@ class AuthProvider with ChangeNotifier {
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(AppConstants.keyMasterSalt, salt);
-      await prefs.setString(AppConstants.keyCachedEmail, email);
+      await prefs.setString(AppConstants.keyCachedEmail, cleanEmail);
 
       _masterKey = derivedKey;
-      _currentUserEmail = email;
+      _currentUserEmail = cleanEmail;
       _status = VaultLockStatus.unlocked;
       notifyListeners();
       return true;
@@ -135,36 +138,115 @@ class AuthProvider with ChangeNotifier {
   /// Login with Master Password
   Future<bool> login({required String email, required String masterPassword}) async {
     _errorMessage = null;
+    final cleanEmail = email.trim().toLowerCase();
+
     try {
       final prefs = await SharedPreferences.getInstance();
       String? salt = prefs.getString(AppConstants.keyMasterSalt);
 
       if (salt == null && SupabaseService.isInitialized) {
-        salt = await _supabaseService.fetchUserMasterSalt(email);
+        salt = await _supabaseService.fetchUserMasterSalt(cleanEmail);
       }
 
-      salt ??= _cryptoService.generateSalt();
+      // Security check: If salt is still null, do NOT invent a random salt!
+      if (salt == null) {
+        if (SupabaseService.isInitialized) {
+          throw Exception('Bu e-posta adresine ait bir hesap bulunamadı. Lütfen kontrol edin veya yeni kasa oluşturun.');
+        } else {
+          throw Exception('Cihazda kayıtlı yerel kasa bulunamadı. Lütfen önce "Yeni Kasa Oluştur" seçeneğini kullanın.');
+        }
+      }
 
       final derivedKey = await _cryptoService.deriveMasterKey(masterPassword, salt);
       final authPassword = _cryptoService.deriveAuthPassword(derivedKey);
 
       if (SupabaseService.isInitialized) {
         await _supabaseService.signIn(
-          email: email,
+          email: cleanEmail,
           authPassword: authPassword,
         );
       }
 
       await prefs.setString(AppConstants.keyMasterSalt, salt);
-      await prefs.setString(AppConstants.keyCachedEmail, email);
+      await prefs.setString(AppConstants.keyCachedEmail, cleanEmail);
 
       _masterKey = derivedKey;
-      _currentUserEmail = email;
+      _currentUserEmail = cleanEmail;
       _status = VaultLockStatus.unlocked;
       notifyListeners();
       return true;
     } catch (e) {
-      _errorMessage = 'Giriş hatası: Şifre veya e-posta hatalı. (${e.toString()})';
+      _errorMessage = 'Giriş hatası: ${e.toString().replaceAll('Exception: ', '')}';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Atomically change the master password and re-encrypt the entire vault
+  Future<bool> changeMasterPassword({
+    required String currentPassword,
+    required String newPassword,
+    required VaultProvider vault,
+  }) async {
+    _errorMessage = null;
+    if (_masterKey == null) {
+      _errorMessage = 'Kasa açık değil.';
+      notifyListeners();
+      return false;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final currentSalt = prefs.getString(AppConstants.keyMasterSalt);
+    if (currentSalt == null) {
+      _errorMessage = 'Mevcut kasa tuzu bulunamadı.';
+      notifyListeners();
+      return false;
+    }
+
+    // 1. Verify current password
+    final testCurrentKey = await _cryptoService.deriveMasterKey(currentPassword, currentSalt);
+    final isCurrentMatch = CryptoService.constantTimeEquals(testCurrentKey, _masterKey!);
+    CryptoService.wipe(testCurrentKey);
+
+    if (!isCurrentMatch) {
+      _errorMessage = 'Mevcut ana şifre hatalı!';
+      notifyListeners();
+      return false;
+    }
+
+    // 2. Derive new keys with fresh random salt
+    final newSalt = _cryptoService.generateSalt();
+    final newMasterKey = await _cryptoService.deriveMasterKey(newPassword, newSalt);
+    final newAuthPassword = _cryptoService.deriveAuthPassword(newMasterKey);
+
+    try {
+      // 3. Re-encrypt all vault items in memory and storage
+      await vault.reEncryptAllWithNewKey(newMasterKey);
+
+      // 4. Update Supabase if connected
+      if (SupabaseService.isInitialized && SupabaseService.currentUser != null) {
+        await _supabaseService.updateMasterSaltAndAuthPassword(
+          newMasterSalt: newSalt,
+          newAuthPassword: newAuthPassword,
+        );
+      }
+
+      // 5. Update local salt
+      await prefs.setString(AppConstants.keyMasterSalt, newSalt);
+
+      // 6. Update Hardware Biometrics if enabled
+      if (_isBiometricEnabled) {
+        await _biometricService.enableBiometrics(newMasterKey);
+      }
+
+      // 7. Update in-memory master key and wipe old key
+      CryptoService.wipe(_masterKey);
+      _masterKey = newMasterKey;
+      notifyListeners();
+      return true;
+    } catch (e) {
+      CryptoService.wipe(newMasterKey);
+      _errorMessage = 'Şifre güncelleme hatası: $e';
       notifyListeners();
       return false;
     }
@@ -210,7 +292,7 @@ class AuthProvider with ChangeNotifier {
   /// Lock Vault (wipes master encryption key from RAM immediately)
   void lockVault() {
     if (_masterKey != null) {
-      _masterKey!.fillRange(0, _masterKey!.length, 0);
+      CryptoService.wipe(_masterKey);
       _masterKey = null;
     }
     _status = VaultLockStatus.lockedWithPass;
@@ -220,6 +302,10 @@ class AuthProvider with ChangeNotifier {
   /// Logout completely
   Future<void> logout() async {
     lockVault();
+    // Security: disable biometric cached key on explicit logout
+    await _biometricService.disableBiometrics();
+    _isBiometricEnabled = false;
+
     if (SupabaseService.isInitialized) {
       await _supabaseService.signOut();
     }

@@ -97,4 +97,26 @@ class CryptoService {
 
     return utf8.decode(decryptedBytes);
   }
+
+  /// Constant-time byte comparison to prevent timing side-channel attacks.
+  static bool constantTimeEquals(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    int result = 0;
+    for (int i = 0; i < a.length; i++) {
+      result |= a[i] ^ b[i];
+    }
+    return result == 0;
+  }
+
+  /// Constant-time string comparison.
+  static bool constantTimeStringEquals(String a, String b) {
+    return constantTimeEquals(utf8.encode(a), utf8.encode(b));
+  }
+
+  /// Safely wipes sensitive byte arrays in RAM with zeros.
+  static void wipe(List<int>? bytes) {
+    if (bytes != null && bytes.isNotEmpty) {
+      bytes.fillRange(0, bytes.length, 0);
+    }
+  }
 }

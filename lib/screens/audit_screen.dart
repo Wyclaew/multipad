@@ -25,9 +25,11 @@ class _AuditScreenState extends State<AuditScreen> {
         .toList();
 
     if (credentials.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Taranacak hesap bulunamadı.')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Taranacak hesap bulunamadı.')),
+        );
+      }
       return;
     }
 
@@ -35,32 +37,33 @@ class _AuditScreenState extends State<AuditScreen> {
 
     int compromisedCount = 0;
     for (final item in credentials) {
+      if (!mounted) return;
       if (item.password.trim().isNotEmpty) {
         final res = await HibpService.checkPasswordBreach(item.password);
+        if (!mounted) return;
         _breachResults[item.id] = res;
         if (res.isCompromised) compromisedCount++;
       }
     }
 
+    if (!mounted) return;
     setState(() => _isCheckingBreaches = false);
 
-    if (mounted) {
-      if (compromisedCount > 0) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('⚠️ Dikkat: $compromisedCount şifreniz bilinen veri sızıntılarında bulundu!'),
-            backgroundColor: Colors.redAccent,
-            duration: const Duration(seconds: 4),
-          ),
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('✅ Harika haber! Hiçbir şifreniz veri sızıntılarında bulunamadı.'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
+    if (compromisedCount > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('⚠️ Dikkat: $compromisedCount şifreniz bilinen veri sızıntılarında bulundu!'),
+          backgroundColor: Colors.redAccent,
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✅ Harika haber! Hiçbir şifreniz veri sızıntılarında bulunamadı.'),
+          backgroundColor: Colors.green,
+        ),
+      );
     }
   }
 
@@ -240,7 +243,10 @@ class _AuditScreenState extends State<AuditScreen> {
           // Pwned / Compromised items first
           if (_breachResults.isNotEmpty) ...[
             ..._breachResults.entries.where((e) => e.value.isCompromised).map((entry) {
-              final item = vault.allItems.firstWhere((i) => i.id == entry.key);
+              final matching = vault.allItems.where((i) => i.id == entry.key);
+              if (matching.isEmpty) return const SizedBox.shrink();
+              final item = matching.first;
+
               return Card(
                 elevation: 0,
                 margin: const EdgeInsets.only(bottom: 8),
@@ -299,15 +305,17 @@ class _AuditScreenState extends State<AuditScreen> {
                 trailing: TextButton(
                   child: const Text('Düzelt'),
                   onPressed: () {
-                    final item = vault.allItems.firstWhere((i) => i.id == issue.itemId);
-                    Navigator.of(context).push(
-                      MaterialPageRoute(builder: (_) => CredentialEditorScreen(initialItem: item)),
-                    );
+                    final matching = vault.allItems.where((i) => i.id == issue.itemId);
+                    if (matching.isNotEmpty) {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(builder: (_) => CredentialEditorScreen(initialItem: matching.first)),
+                      );
+                    }
                   },
                 ),
               ),
             );
-          }).toList(),
+          }),
         ],
       ),
     );

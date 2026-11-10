@@ -20,7 +20,7 @@ enum VaultCategoryFilter {
 class VaultProvider with ChangeNotifier {
   final CryptoService _cryptoService;
   final SupabaseService _supabaseService;
-  final List<int> _masterKey;
+  List<int> _masterKey;
 
   List<VaultItem> _items = [];
   bool _isLoading = false;
@@ -35,7 +35,7 @@ class VaultProvider with ChangeNotifier {
     required List<int> masterKey,
   })  : _cryptoService = cryptoService,
         _supabaseService = supabaseService,
-        _masterKey = masterKey {
+        _masterKey = List<int>.from(masterKey) {
     loadVault();
     _subscribeToRealtime();
   }
@@ -273,6 +273,50 @@ class VaultProvider with ChangeNotifier {
     }
   }
 
+  /// Re-encrypts all items with a new master key during master password rotation
+  Future<void> reEncryptAllWithNewKey(List<int> newMasterKey) async {
+    final List<Map<String, dynamic>> updatedStorageList = [];
+
+    for (int i = 0; i < _items.length; i++) {
+      final item = _items[i];
+      final plainJson = item.toPlainJson();
+      final encrypted = await _cryptoService.encryptData(plainJson, newMasterKey);
+
+      final updatedItem = item.copyWith(
+        rawCiphertext: encrypted.ciphertext,
+        rawIv: encrypted.iv,
+        rawMac: encrypted.mac,
+        clientUpdatedAt: DateTime.now().toUtc(),
+      );
+
+      _items[i] = updatedItem;
+
+      final storageMap = updatedItem.toStorageMap(
+        encryptedPayload: encrypted.ciphertext,
+        iv: encrypted.iv,
+        mac: encrypted.mac,
+      );
+      updatedStorageList.add(storageMap);
+
+      // If online, update remote record
+      if (SupabaseService.isInitialized && SupabaseService.currentUser != null) {
+        try {
+          await _supabaseService.upsertVaultItem(storageMap);
+        } catch (e) {
+          debugPrint('Remote re-encrypt upsert error for item ${item.id}: $e');
+        }
+      }
+    }
+
+    // Save all to local storage
+    await OfflineStorageService.saveAllItems(updatedStorageList);
+
+    // Securely replace the in-memory master key
+    CryptoService.wipe(_masterKey);
+    _masterKey = List<int>.from(newMasterKey);
+    notifyListeners();
+  }
+
   /// Toggle item favorite status
   Future<void> toggleFavorite(VaultItem item) async {
     final updated = item.copyWith(isFavorite: !item.isFavorite);
@@ -313,6 +357,14 @@ class VaultProvider with ChangeNotifier {
     }
   }
 
+  /// Empty all items from Trash permanently
+  Future<void> emptyTrash() async {
+    final trashItems = _items.where((i) => i.isTrash).toList();
+    for (final item in trashItems) {
+      await deleteItem(item.id);
+    }
+  }
+
   // Helper factory methods for new empty items
   VaultItem createNewNote() => VaultItem(id: const Uuid().v4(), type: VaultItemType.note, title: '', content: '');
   VaultItem createNewCredential() => VaultItem(id: const Uuid().v4(), type: VaultItemType.credential, title: '');
@@ -322,6 +374,9 @@ class VaultProvider with ChangeNotifier {
   @override
   void dispose() {
     _subscription?.unsubscribe();
+    // Memory hygiene: wipe master key and clear decrypted objects from RAM
+    CryptoService.wipe(_masterKey);
+    _items.clear();
     super.dispose();
   }
 }

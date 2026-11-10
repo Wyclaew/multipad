@@ -53,12 +53,24 @@ class SupabaseService {
   /// Check if user profile has a master_salt stored in Supabase
   Future<String?> fetchUserMasterSalt(String email) async {
     if (_client == null) return null;
+    final cleanEmail = email.trim().toLowerCase();
+
+    // 1. Primary method: call the Security Definer RPC function (works before authentication)
     try {
-      // In Supabase, during sign-in, if user profile exists:
+      final res = await _client!.rpc('get_user_salt', params: {'lookup_email': cleanEmail});
+      if (res != null && res.toString().trim().isNotEmpty) {
+        return res.toString().trim();
+      }
+    } catch (e) {
+      debugPrint('RPC get_user_salt error (falling back to direct query): $e');
+    }
+
+    // 2. Direct query fallback
+    try {
       final response = await _client!
           .from('user_profiles')
           .select('master_salt')
-          .limit(1)
+          .eq('email', cleanEmail)
           .maybeSingle();
 
       if (response != null && response['master_salt'] != null) {
@@ -66,7 +78,7 @@ class SupabaseService {
       }
       return null;
     } catch (e) {
-      debugPrint('fetchUserMasterSalt error: $e');
+      debugPrint('fetchUserMasterSalt direct query error: $e');
       return null;
     }
   }
@@ -79,16 +91,18 @@ class SupabaseService {
   }) async {
     if (_client == null) throw Exception('Supabase bağlantısı henüz yapılandırılmadı.');
 
+    final cleanEmail = email.trim().toLowerCase();
     final response = await _client!.auth.signUp(
-      email: email,
+      email: cleanEmail,
       password: authPassword,
     );
 
     final user = response.user;
     if (user != null) {
       // Store user's salt in user_profiles
-      await _client!.from('user_profiles').insert({
+      await _client!.from('user_profiles').upsert({
         'id': user.id,
+        'email': cleanEmail,
         'master_salt': masterSalt,
       });
     }
@@ -103,8 +117,26 @@ class SupabaseService {
   }) async {
     if (_client == null) throw Exception('Supabase bağlantısı henüz yapılandırılmadı.');
     return await _client!.auth.signInWithPassword(
-      email: email,
+      email: email.trim().toLowerCase(),
       password: authPassword,
+    );
+  }
+
+  /// Updates user master salt and auth password in Supabase during password change
+  Future<void> updateMasterSaltAndAuthPassword({
+    required String newMasterSalt,
+    required String newAuthPassword,
+  }) async {
+    if (_client == null || currentUser == null) return;
+
+    // 1. Update master_salt in user_profiles
+    await _client!.from('user_profiles').update({
+      'master_salt': newMasterSalt,
+    }).eq('id', currentUser!.id);
+
+    // 2. Update Supabase Auth account password
+    await _client!.auth.updateUser(
+      UserAttributes(password: newAuthPassword),
     );
   }
 
