@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/vault_item.dart';
+import '../providers/auth_provider.dart';
 import '../providers/vault_provider.dart';
 import '../services/audit_service.dart';
 import '../services/hibp_service.dart';
@@ -16,13 +17,6 @@ class AuditScreen extends StatefulWidget {
 class _AuditScreenState extends State<AuditScreen> {
   bool _isCheckingBreaches = false;
   final Map<String, HibpResult> _breachResults = {};
-  final TextEditingController _emailCheckController = TextEditingController();
-
-  @override
-  void dispose() {
-    _emailCheckController.dispose();
-    super.dispose();
-  }
 
   Future<void> _runBreachCheck() async {
     final vault = context.read<VaultProvider>();
@@ -73,7 +67,11 @@ class _AuditScreenState extends State<AuditScreen> {
   @override
   Widget build(BuildContext context) {
     final vault = context.watch<VaultProvider>();
-    final report = AuditService.analyzeVault(vault.allItems);
+    final auth = context.watch<AuthProvider>();
+    final report = AuditService.analyzeVault(
+      vault.allItems,
+      globalExpiryDays: auth.globalPasswordExpiryDays,
+    );
     final theme = Theme.of(context);
 
     // Calculate score with breach penalties
@@ -181,7 +179,7 @@ class _AuditScreenState extends State<AuditScreen> {
 
           const SizedBox(height: 16),
 
-          // 4 Metrics Row
+          // 5 Metrics Row (including Expired Passwords)
           Row(
             children: [
               Expanded(
@@ -192,7 +190,16 @@ class _AuditScreenState extends State<AuditScreen> {
                   icon: Icons.dangerous_outlined,
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _buildMetricTile(
+                  title: 'Süresi Dolan',
+                  count: report.expiredPasswordsCount,
+                  color: Colors.amber,
+                  icon: Icons.alarm_on_rounded,
+                ),
+              ),
+              const SizedBox(width: 6),
               Expanded(
                 child: _buildMetricTile(
                   title: 'Zayıf Şifre',
@@ -201,16 +208,16 @@ class _AuditScreenState extends State<AuditScreen> {
                   icon: Icons.warning_amber_rounded,
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               Expanded(
                 child: _buildMetricTile(
                   title: 'Tekrar Eden',
                   count: report.reusedPasswordsCount,
-                  color: Colors.amber,
+                  color: Colors.purpleAccent,
                   icon: Icons.repeat_rounded,
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               Expanded(
                 child: _buildMetricTile(
                   title: '2FA Eksik',
@@ -262,8 +269,22 @@ class _AuditScreenState extends State<AuditScreen> {
             }),
           ],
 
-          // Weak / Reused issues
+          // Weak / Expired / Reused issues
           ...report.issues.map((issue) {
+            Color issueColor = Colors.blueAccent;
+            IconData issueIcon = Icons.info_outline_rounded;
+
+            if (issue.issueType == 'expired') {
+              issueColor = Colors.amber;
+              issueIcon = Icons.alarm_on_rounded;
+            } else if (issue.severity == 3) {
+              issueColor = Colors.redAccent;
+              issueIcon = Icons.error_outline_rounded;
+            } else if (issue.severity == 2) {
+              issueColor = Colors.orangeAccent;
+              issueIcon = Icons.warning_amber_rounded;
+            }
+
             return Card(
               elevation: 0,
               margin: const EdgeInsets.only(bottom: 8),
@@ -272,18 +293,7 @@ class _AuditScreenState extends State<AuditScreen> {
                 side: BorderSide(color: theme.colorScheme.outlineVariant.withOpacity(0.6)),
               ),
               child: ListTile(
-                leading: Icon(
-                  issue.severity == 3
-                      ? Icons.error_outline_rounded
-                      : issue.severity == 2
-                          ? Icons.warning_amber_rounded
-                          : Icons.info_outline_rounded,
-                  color: issue.severity == 3
-                      ? Colors.redAccent
-                      : issue.severity == 2
-                          ? Colors.orangeAccent
-                          : Colors.blueAccent,
-                ),
+                leading: Icon(issueIcon, color: issueColor),
                 title: Text(issue.title, style: const TextStyle(fontWeight: FontWeight.w600)),
                 subtitle: Text(issue.description, style: const TextStyle(fontSize: 12)),
                 trailing: TextButton(
@@ -310,7 +320,7 @@ class _AuditScreenState extends State<AuditScreen> {
     required IconData icon,
   }) {
     return Container(
-      padding: const EdgeInsets.all(10),
+      padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: color.withOpacity(0.08),
         borderRadius: BorderRadius.circular(10),
@@ -318,15 +328,15 @@ class _AuditScreenState extends State<AuditScreen> {
       ),
       child: Column(
         children: [
-          Icon(icon, color: color, size: 20),
+          Icon(icon, color: color, size: 18),
           const SizedBox(height: 4),
           Text(
             '$count',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color),
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: color),
           ),
           Text(
             title,
-            style: const TextStyle(fontSize: 10, color: Colors.grey),
+            style: const TextStyle(fontSize: 9, color: Colors.grey),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
           ),

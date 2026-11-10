@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
 import '../models/vault_item.dart';
+import '../providers/auth_provider.dart';
 import '../services/clipboard_service.dart';
 import '../services/totp_service.dart';
 
@@ -74,9 +76,12 @@ class _VaultItemCardState extends State<VaultItemCard> {
 
   @override
   Widget build(BuildContext context) {
+    final auth = context.watch<AuthProvider>();
     final item = widget.item;
     final theme = Theme.of(context);
     final dateFormat = DateFormat('dd MMM, HH:mm');
+
+    final bool isExpired = item.isPasswordExpired(auth.globalPasswordExpiryDays);
 
     Color typeColor = Colors.blueAccent;
     IconData typeIcon = Icons.description_outlined;
@@ -107,10 +112,12 @@ class _VaultItemCardState extends State<VaultItemCard> {
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(14),
         side: BorderSide(
-          color: item.isPinned
-              ? Colors.blueAccent.withOpacity(0.5)
-              : theme.colorScheme.outlineVariant.withOpacity(0.6),
-          width: item.isPinned ? 1.5 : 1.0,
+          color: isExpired
+              ? Colors.amber.withOpacity(0.8)
+              : item.isPinned
+                  ? Colors.blueAccent.withOpacity(0.5)
+                  : theme.colorScheme.outlineVariant.withOpacity(0.6),
+          width: (item.isPinned || isExpired) ? 1.5 : 1.0,
         ),
       ),
       child: InkWell(
@@ -190,6 +197,30 @@ class _VaultItemCardState extends State<VaultItemCard> {
                   ),
                 ],
               ),
+
+              // Expired Password Alert Pill (Item 30)
+              if (isExpired) ...[
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: Colors.amber.withOpacity(0.4)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.alarm_on_rounded, size: 14, color: Colors.amber),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Şifre Yenileme Zamanı Geldi (${item.passwordAgeDays} gündür güncel)',
+                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.amber),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
 
               const SizedBox(height: 10),
 

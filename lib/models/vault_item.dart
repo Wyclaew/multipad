@@ -20,6 +20,11 @@ class VaultItem {
   final String website;       // Used for credentials
   final String totpSecret;    // 2FA TOTP Base32 secret
 
+  // Password Expiry & Reminder System (Item 30)
+  final DateTime? passwordLastModified; // When password was last changed
+  final int? customExpiryDays;          // null = use global, -1 = never remind, >0 = custom days
+  final DateTime? customReminderDate;   // Specific date for reminder
+
   // Credit / Bank Card fields
   final String cardNumber;
   final String cardHolder;
@@ -57,6 +62,9 @@ class VaultItem {
     this.password = '',
     this.website = '',
     this.totpSecret = '',
+    this.passwordLastModified,
+    this.customExpiryDays,
+    this.customReminderDate,
     this.cardNumber = '',
     this.cardHolder = '',
     this.cardExpiry = '',
@@ -87,6 +95,9 @@ class VaultItem {
     String? password,
     String? website,
     String? totpSecret,
+    DateTime? passwordLastModified,
+    int? customExpiryDays,
+    DateTime? customReminderDate,
     String? cardNumber,
     String? cardHolder,
     String? cardExpiry,
@@ -115,6 +126,9 @@ class VaultItem {
       password: password ?? this.password,
       website: website ?? this.website,
       totpSecret: totpSecret ?? this.totpSecret,
+      passwordLastModified: passwordLastModified ?? this.passwordLastModified,
+      customExpiryDays: customExpiryDays ?? this.customExpiryDays,
+      customReminderDate: customReminderDate ?? this.customReminderDate,
       cardNumber: cardNumber ?? this.cardNumber,
       cardHolder: cardHolder ?? this.cardHolder,
       cardExpiry: cardExpiry ?? this.cardExpiry,
@@ -144,6 +158,9 @@ class VaultItem {
       'password': password,
       'website': website,
       'totpSecret': totpSecret,
+      'passwordLastModified': passwordLastModified?.toIso8601String(),
+      'customExpiryDays': customExpiryDays,
+      'customReminderDate': customReminderDate?.toIso8601String(),
       'cardNumber': cardNumber,
       'cardHolder': cardHolder,
       'cardExpiry': cardExpiry,
@@ -182,6 +199,13 @@ class VaultItem {
       password: decryptedPayload['password'] as String? ?? '',
       website: decryptedPayload['website'] as String? ?? '',
       totpSecret: decryptedPayload['totpSecret'] as String? ?? '',
+      passwordLastModified: decryptedPayload['passwordLastModified'] != null
+          ? DateTime.tryParse(decryptedPayload['passwordLastModified'] as String)
+          : null,
+      customExpiryDays: decryptedPayload['customExpiryDays'] as int?,
+      customReminderDate: decryptedPayload['customReminderDate'] != null
+          ? DateTime.tryParse(decryptedPayload['customReminderDate'] as String)
+          : null,
       cardNumber: decryptedPayload['cardNumber'] as String? ?? '',
       cardHolder: decryptedPayload['cardHolder'] as String? ?? '',
       cardExpiry: decryptedPayload['cardExpiry'] as String? ?? '',
@@ -208,7 +232,36 @@ class VaultItem {
     );
   }
 
-  // Map representation for Supabase or local offline storage (only encrypted values!)
+  // Password age in days
+  int get passwordAgeDays {
+    final lastMod = passwordLastModified ?? clientUpdatedAt;
+    return DateTime.now().difference(lastMod).inDays;
+  }
+
+  // Checks whether the password is due for renewal
+  bool isPasswordExpired(int globalExpiryDays) {
+    if (type != VaultItemType.credential || password.isEmpty) return false;
+
+    // 1. Explicit reminder date check
+    if (customReminderDate != null) {
+      return DateTime.now().isAfter(customReminderDate!);
+    }
+
+    // 2. Custom expiry days check
+    if (customExpiryDays != null) {
+      if (customExpiryDays == -1) return false; // explicitly disabled for this item
+      return passwordAgeDays >= customExpiryDays!;
+    }
+
+    // 3. Global expiry days check
+    if (globalExpiryDays > 0) {
+      return passwordAgeDays >= globalExpiryDays;
+    }
+
+    return false;
+  }
+
+  // Map representation for storage
   Map<String, dynamic> toStorageMap({
     required String encryptedPayload,
     required String iv,

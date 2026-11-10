@@ -13,6 +13,7 @@ class AppConstants {
   static const String keyBiometricMasterKey = 'multipad_biometric_master_key';
   static const String keyCachedEmail = 'multipad_cached_email';
   static const String keyOfflineItems = 'multipad_offline_items';
+  static const String keyGlobalPasswordExpiryDays = 'multipad_global_password_expiry_days'; // 0 = off, 30, 60, 90, 180, 365
 
   // Crypto parameters
   static const int pbkdf2Iterations = 100000;

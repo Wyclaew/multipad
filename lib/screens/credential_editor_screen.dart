@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/vault_item.dart';
+import '../providers/auth_provider.dart';
 import '../providers/vault_provider.dart';
 import '../services/clipboard_service.dart';
 import '../widgets/password_generator_dialog.dart';
@@ -19,10 +21,21 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
   late TextEditingController _usernameController;
   late TextEditingController _passwordController;
   late TextEditingController _websiteController;
+  late TextEditingController _totpController;
   late TextEditingController _notesController;
   late TextEditingController _tagInputController;
+  late TextEditingController _customDaysController;
+
   late List<String> _tags;
   late bool _isFavorite;
+  late bool _isPinned;
+
+  // Reminder state
+  int _reminderMode = 0; // 0: Global, 1: Custom Days, 2: Specific Date, 3: Disabled
+  DateTime? _selectedReminderDate;
+  DateTime? _passwordLastModified;
+  late String _initialPassword;
+
   bool _obscurePassword = true;
   bool _isSaving = false;
 
@@ -30,14 +43,35 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
   void initState() {
     super.initState();
     final item = widget.initialItem;
+    _initialPassword = item?.password ?? '';
     _titleController = TextEditingController(text: item?.title ?? '');
     _usernameController = TextEditingController(text: item?.username ?? '');
-    _passwordController = TextEditingController(text: item?.password ?? '');
+    _passwordController = TextEditingController(text: _initialPassword);
     _websiteController = TextEditingController(text: item?.website ?? '');
+    _totpController = TextEditingController(text: item?.totpSecret ?? '');
     _notesController = TextEditingController(text: item?.content ?? '');
     _tagInputController = TextEditingController();
+
     _tags = List<String>.from(item?.tags ?? []);
     _isFavorite = item?.isFavorite ?? false;
+    _isPinned = item?.isPinned ?? false;
+
+    _passwordLastModified = item?.passwordLastModified;
+    _selectedReminderDate = item?.customReminderDate;
+
+    if (item?.customExpiryDays == -1) {
+      _reminderMode = 3; // Disabled
+      _customDaysController = TextEditingController();
+    } else if (item?.customReminderDate != null) {
+      _reminderMode = 2; // Specific Date
+      _customDaysController = TextEditingController();
+    } else if (item?.customExpiryDays != null && item!.customExpiryDays! > 0) {
+      _reminderMode = 1; // Custom Days
+      _customDaysController = TextEditingController(text: item.customExpiryDays.toString());
+    } else {
+      _reminderMode = 0; // Global default
+      _customDaysController = TextEditingController();
+    }
   }
 
   @override
@@ -46,8 +80,10 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
     _usernameController.dispose();
     _passwordController.dispose();
     _websiteController.dispose();
+    _totpController.dispose();
     _notesController.dispose();
     _tagInputController.dispose();
+    _customDaysController.dispose();
     super.dispose();
   }
 
@@ -60,7 +96,24 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
     if (generated != null && generated.isNotEmpty) {
       setState(() {
         _passwordController.text = generated;
-        _obscurePassword = false; // Show newly generated password
+        _obscurePassword = false;
+      });
+    }
+  }
+
+  Future<void> _pickReminderDate() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _selectedReminderDate ?? now.add(const Duration(days: 30)),
+      firstDate: now,
+      lastDate: now.add(const Duration(days: 365 * 5)),
+    );
+
+    if (picked != null) {
+      setState(() {
+        _selectedReminderDate = picked;
+        _reminderMode = 2;
       });
     }
   }
@@ -75,23 +128,51 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
     setState(() => _isSaving = true);
     final vault = context.read<VaultProvider>();
 
+    // Check if password changed to update passwordLastModified and history
+    final newPass = _passwordController.text;
+    final List<String> history = List.from(widget.initialItem?.passwordHistory ?? []);
+    DateTime? lastMod = _passwordLastModified;
+
+    if (newPass != _initialPassword) {
+      lastMod = DateTime.now().toUtc();
+      if (_initialPassword.isNotEmpty && !history.contains(_initialPassword)) {
+        history.insert(0, _initialPassword);
+      }
+    }
+
+    // Determine expiry settings
+    int? customDays;
+    DateTime? reminderDate;
+
+    if (_reminderMode == 1) {
+      customDays = int.tryParse(_customDaysController.text.trim());
+    } else if (_reminderMode == 2) {
+      reminderDate = _selectedReminderDate;
+    } else if (_reminderMode == 3) {
+      customDays = -1; // Disabled
+    }
+
     final updatedItem = (widget.initialItem ?? vault.createNewCredential()).copyWith(
       title: title.isEmpty ? 'İsimsiz Hesap' : title,
       username: _usernameController.text.trim(),
-      password: _passwordController.text,
+      password: newPass,
       website: _websiteController.text.trim(),
+      totpSecret: _totpController.text.trim().replaceAll(' ', ''),
       content: _notesController.text.trim(),
       tags: _tags,
       isFavorite: _isFavorite,
+      isPinned: _isPinned,
+      passwordLastModified: lastMod,
+      customExpiryDays: customDays,
+      customReminderDate: reminderDate,
+      passwordHistory: history,
       clientUpdatedAt: DateTime.now().toUtc(),
     );
 
     await vault.saveItem(updatedItem);
     setState(() => _isSaving = false);
 
-    if (mounted) {
-      Navigator.of(context).pop();
-    }
+    if (mounted) Navigator.of(context).pop();
   }
 
   void _addTag(String rawTag) {
@@ -104,58 +185,31 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
     }
   }
 
-  void _removeTag(String tag) {
-    setState(() => _tags.remove(tag));
-  }
-
-  Future<void> _delete() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Hesabı Sil'),
-        content: const Text('Bu şifreli hesap kartını silmek istediğinize emin misiniz?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Vazgeç')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Sil'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed == true && mounted) {
-      if (widget.initialItem != null) {
-        await context.read<VaultProvider>().deleteItem(widget.initialItem!.id);
-      }
-      if (mounted) Navigator.of(context).pop();
-    }
-  }
+  void _removeTag(String tag) => setState(() => _tags.remove(tag));
 
   @override
   Widget build(BuildContext context) {
+    final auth = context.watch<AuthProvider>();
+    final dateFormat = DateFormat('dd MMMM yyyy');
+
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.initialItem == null ? 'Yeni Şifre / Hesap' : 'Hesap Düzenle'),
         actions: [
+          IconButton(
+            icon: Icon(_isPinned ? Icons.push_pin : Icons.push_pin_outlined),
+            color: _isPinned ? Colors.blueAccent : null,
+            tooltip: _isPinned ? 'Sabitlemeyi Kaldır' : 'Başa Sabitle',
+            onPressed: () => setState(() => _isPinned = !_isPinned),
+          ),
           IconButton(
             icon: Icon(_isFavorite ? Icons.star_rounded : Icons.star_outline_rounded),
             color: _isFavorite ? Colors.amber : null,
             tooltip: _isFavorite ? 'Favorilerden Çıkar' : 'Favorilere Ekle',
             onPressed: () => setState(() => _isFavorite = !_isFavorite),
           ),
-          if (widget.initialItem != null)
-            IconButton(
-              icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-              tooltip: 'Sil',
-              onPressed: _delete,
-            ),
           FilledButton.icon(
-            style: FilledButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              visualDensity: VisualDensity.compact,
-            ),
+            style: FilledButton.styleFrom(visualDensity: VisualDensity.compact),
             icon: _isSaving
                 ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                 : const Icon(Icons.save_outlined, size: 18),
@@ -173,13 +227,13 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Title (Item Name)
+                // Title
                 TextField(
                   controller: _titleController,
                   style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                   decoration: const InputDecoration(
                     labelText: 'Hesap / Servis Adı',
-                    hintText: 'Örn: Google, Banka, GitHub',
+                    hintText: 'Örn: Google, GitHub, Banka',
                     prefixIcon: Icon(Icons.label_outline),
                     border: OutlineInputBorder(),
                   ),
@@ -245,7 +299,7 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
                         ),
                         IconButton(
                           icon: const Icon(Icons.auto_fix_high_outlined, color: Colors.blueAccent),
-                          tooltip: 'Güçlü Şifre Üret',
+                          tooltip: 'Gelişmiş Şifre Motoru',
                           onPressed: _openPasswordGenerator,
                         ),
                         IconButton(
@@ -256,14 +310,117 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
                               await ClipboardService.copySecurely(_passwordController.text);
                               if (context.mounted) {
                                 ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Şifre kopyalandı! (30 sn sonra otomatik temizlenir)'),
-                                  ),
+                                  const SnackBar(content: Text('Şifre kopyalandı! (30 sn sonra temizlenir)')),
                                 );
                               }
                             }
                           },
                         ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // 2FA TOTP Secret Key field
+                TextField(
+                  controller: _totpController,
+                  decoration: const InputDecoration(
+                    labelText: '2FA / TOTP Gizli Anahtarı (İsteğe bağlı)',
+                    hintText: 'JBSWY3DPEHPK3PXP...',
+                    prefixIcon: Icon(Icons.phonelink_lock_rounded),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 20),
+
+                // --------------------------------------------------------
+                // ŞİFRE YENİLEME VE GÜNCELLEME HATIRLATICISI (Item 30)
+                // --------------------------------------------------------
+                Card(
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.alarm_on_rounded, color: Colors.blueAccent, size: 20),
+                            const SizedBox(width: 8),
+                            const Text(
+                              'Şifre Yenileme Hatırlatıcısı (Item 30)',
+                              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                            ),
+                            const Spacer(),
+                            if (widget.initialItem != null)
+                              Text(
+                                '${widget.initialItem!.passwordAgeDays} gündür güncel',
+                                style: const TextStyle(fontSize: 12, color: Colors.grey),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        DropdownButtonFormField<int>(
+                          value: _reminderMode,
+                          decoration: const InputDecoration(
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                            labelText: 'Bu Şifre İçin Hatırlatma Kuralı',
+                          ),
+                          items: [
+                            DropdownMenuItem(
+                              value: 0,
+                              child: Text(
+                                auth.globalPasswordExpiryDays > 0
+                                    ? 'Genel Kasa Kuralını Kullan (${auth.globalPasswordExpiryDays} gün)'
+                                    : 'Genel Kasa Kuralını Kullan (Kapalı)',
+                              ),
+                            ),
+                            const DropdownMenuItem(value: 1, child: Text('Özel Gün Aralığı Belirle')),
+                            const DropdownMenuItem(value: 2, child: Text('Spesifik Bir Hatırlatma Tarihi Seç')),
+                            const DropdownMenuItem(value: 3, child: Text('Bu Şifre İçin Hatırlatmayı Kapat')),
+                          ],
+                          onChanged: (val) {
+                            if (val != null) setState(() => _reminderMode = val);
+                          },
+                        ),
+                        if (_reminderMode == 1) ...[
+                          const SizedBox(height: 12),
+                          TextField(
+                            controller: _customDaysController,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'Kaç günde bir yenileme hatırlatılsın?',
+                              hintText: 'Örn: 45',
+                              prefixIcon: Icon(Icons.timer_outlined),
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ] else if (_reminderMode == 2) ...[
+                          const SizedBox(height: 12),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  _selectedReminderDate != null
+                                      ? 'Hatırlatma Tarihi: ${dateFormat.format(_selectedReminderDate!)}'
+                                      : 'Henüz bir tarih seçilmedi.',
+                                  style: const TextStyle(fontSize: 13),
+                                ),
+                              ),
+                              OutlinedButton.icon(
+                                icon: const Icon(Icons.calendar_month_outlined, size: 16),
+                                label: const Text('Tarih Seç'),
+                                onPressed: _pickReminderDate,
+                              ),
+                            ],
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -300,16 +457,38 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
                 ),
                 const SizedBox(height: 16),
 
-                // Extra Notes (Recovery Codes, PINs, etc.)
+                // Notes
                 TextField(
                   controller: _notesController,
-                  maxLines: 5,
+                  maxLines: 4,
                   decoration: const InputDecoration(
                     labelText: 'Güvenli Ek Notlar (2FA Kurtarma Kodları, PIN vb.)',
                     alignLabelWithHint: true,
                     border: OutlineInputBorder(),
                   ),
                 ),
+
+                // Password History (if available)
+                if (widget.initialItem != null && widget.initialItem!.passwordHistory.isNotEmpty) ...[
+                  const SizedBox(height: 20),
+                  ExpansionTile(
+                    title: Text(
+                      'Eski Şifre Geçmişi (${widget.initialItem!.passwordHistory.length})',
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                    ),
+                    children: widget.initialItem!.passwordHistory.map((oldPass) {
+                      return ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.history, size: 18),
+                        title: Text(oldPass, style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.copy, size: 16),
+                          onPressed: () => ClipboardService.copySecurely(oldPass),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ],
               ],
             ),
           ),

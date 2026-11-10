@@ -77,7 +77,6 @@ jobs:
 
       - name: Configure macOS Entitlements (Network & Keychain)
         run: |
-          # Enable outgoing network in entitlements
           for file in macos/Runner/DebugProfile.entitlements macos/Runner/Release.entitlements; do
             if [ -f "$file" ]; then
               sed -i '' '/<dict>/a\
@@ -129,7 +128,10 @@ jobs:
         run: flutter pub get
 
       - name: Build Windows Executable (Release)
-        run: flutter build windows --release
+        run: |
+          $env:CL = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+          $env:_CL_ = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+          flutter build windows --release
 
       - name: Package Windows Binary (Zip)
         run: |
@@ -147,6 +149,7 @@ jobs:
   release:
     name: Publish Release & Cleanup Old Versions
     needs: [build-android, build-macos, build-windows]
+    if: always() && (needs.build-android.result == 'success' || needs.build-macos.result == 'success' || needs.build-windows.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -156,18 +159,21 @@ jobs:
 
       - name: Download Android Artifact
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: android-apk
           path: release_assets
 
       - name: Download macOS Artifact
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: macos-dmg
           path: release_assets
 
       - name: Download Windows Artifact
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: windows-zip
           path: release_assets
@@ -196,19 +202,20 @@ jobs:
         run: |
           TAG_NAME="${{ steps.get_version.outputs.VERSION }}"
           gh release create "$TAG_NAME" \
-            release_assets/MultiPad-Android.apk \
-            release_assets/MultiPad-macOS.dmg \
-            release_assets/MultiPad-Windows.zip \
+            release_assets/* \
             --title "MultiPad $TAG_NAME" \
             --notes "### 🚀 MultiPad En Güncel Sürüm ($TAG_NAME)
 
           **İndirme Seçenekleri:**
-          - 📱 **Android:** \`MultiPad-Android.apk\` (Doğrudan telefona yüklenebilir)
+          - 📱 **Android:** \`MultiPad-Android.apk\`
           - 🍎 **macOS:** \`MultiPad-macOS.dmg\` (Touch ID destekli)
           - 🪟 **Windows:** \`MultiPad-Windows.zip\` (Zipten çıkarıp \`MultiPad.exe\` çalıştırın)
 
-          **Güvenlik:**
+          **Öne Çıkan Özellikler:**
           - Uçtan Uca Şifreleme (AES-256-GCM + PBKDF2-HMAC-SHA256)
-          - Sıfır-Bilgi Koruması
+          - Sıfır-Bilgi Koruması & Çevrimdışı Kasa (Offline-First)
           - Biyometrik Kilit (Touch ID / Parmak İzi)
-          - Dahili 2FA TOTP Kimlik Doğrulayıcı"
+          - Şifre Yenileme Hatırlatıcısı (Genel & Özel Tarihli Hatırlatıcılar)
+          - Have I Been Pwned (HIBP) Sızıntı Denetimi
+          - 256 Karakterlik Gelişmiş Şifre & Diceware Parola Motoru
+          - WycDev Kedi & Konfeti Sürprizi (7 Tık)"

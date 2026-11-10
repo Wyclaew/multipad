@@ -21,6 +21,7 @@ class AuthProvider with ChangeNotifier {
   String? _currentUserEmail;
   bool _canUseBiometrics = false;
   bool _isBiometricEnabled = false;
+  int _globalPasswordExpiryDays = 90; // Default 90 days (0 = disabled)
   String? _errorMessage;
 
   VaultLockStatus get status => _status;
@@ -29,6 +30,7 @@ class AuthProvider with ChangeNotifier {
   String? get currentUserEmail => _currentUserEmail;
   bool get canUseBiometrics => _canUseBiometrics;
   bool get isBiometricEnabled => _isBiometricEnabled;
+  int get globalPasswordExpiryDays => _globalPasswordExpiryDays;
   String? get errorMessage => _errorMessage;
 
   CryptoService get cryptoService => _cryptoService;
@@ -40,15 +42,25 @@ class AuthProvider with ChangeNotifier {
     final url = prefs.getString(AppConstants.keySupabaseUrl) ?? AppConstants.defaultSupabaseUrl;
     final anonKey = prefs.getString(AppConstants.keySupabaseAnonKey) ?? AppConstants.defaultSupabaseAnonKey;
 
+    _globalPasswordExpiryDays = prefs.getInt(AppConstants.keyGlobalPasswordExpiryDays) ?? 90;
+
     if (url.trim().isEmpty || anonKey.trim().isEmpty) {
-      _status = VaultLockStatus.needsSetup;
+      // Offline-first: default to locked with pass so local vault works
+      _status = VaultLockStatus.lockedWithPass;
+      _currentUserEmail = prefs.getString(AppConstants.keyCachedEmail) ?? 'Yerel Kasa Kullanıcısı';
+      _canUseBiometrics = await _biometricService.canCheckBiometrics();
+      _isBiometricEnabled = await _biometricService.isBiometricUnlockEnabled();
       notifyListeners();
+
+      if (_isBiometricEnabled && _canUseBiometrics) {
+        await unlockWithBiometrics();
+      }
       return;
     }
 
     final initialized = await SupabaseService.initialize();
     if (!initialized) {
-      _status = VaultLockStatus.needsSetup;
+      _status = VaultLockStatus.lockedWithPass;
       notifyListeners();
       return;
     }
@@ -57,14 +69,20 @@ class AuthProvider with ChangeNotifier {
     _canUseBiometrics = await _biometricService.canCheckBiometrics();
     _isBiometricEnabled = await _biometricService.isBiometricUnlockEnabled();
 
-    // Default to locked state awaiting password or biometric unlock
     _status = VaultLockStatus.lockedWithPass;
     notifyListeners();
 
-    // If biometric unlock is enabled, try unlocking immediately
     if (_isBiometricEnabled && _canUseBiometrics) {
       await unlockWithBiometrics();
     }
+  }
+
+  /// Change global password expiry days (0 = disabled, 30, 60, 90, 180, 365)
+  Future<void> setGlobalPasswordExpiryDays(int days) async {
+    _globalPasswordExpiryDays = days;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(AppConstants.keyGlobalPasswordExpiryDays, days);
+    notifyListeners();
   }
 
   /// Configure or update Supabase credentials
@@ -90,11 +108,13 @@ class AuthProvider with ChangeNotifier {
       final derivedKey = await _cryptoService.deriveMasterKey(masterPassword, salt);
       final authPassword = _cryptoService.deriveAuthPassword(derivedKey);
 
-      await _supabaseService.signUp(
-        email: email,
-        authPassword: authPassword,
-        masterSalt: salt,
-      );
+      if (SupabaseService.isInitialized) {
+        await _supabaseService.signUp(
+          email: email,
+          authPassword: authPassword,
+          masterSalt: salt,
+        );
+      }
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(AppConstants.keyMasterSalt, salt);
@@ -119,21 +139,21 @@ class AuthProvider with ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       String? salt = prefs.getString(AppConstants.keyMasterSalt);
 
-      // If salt not cached locally, fetch from Supabase user_profiles
-      salt ??= await _supabaseService.fetchUserMasterSalt(email);
-
-      if (salt == null) {
-        // Fallback: derive deterministic salt from email if user profile was created elsewhere
-        salt = _cryptoService.generateSalt();
+      if (salt == null && SupabaseService.isInitialized) {
+        salt = await _supabaseService.fetchUserMasterSalt(email);
       }
+
+      salt ??= _cryptoService.generateSalt();
 
       final derivedKey = await _cryptoService.deriveMasterKey(masterPassword, salt);
       final authPassword = _cryptoService.deriveAuthPassword(derivedKey);
 
-      await _supabaseService.signIn(
-        email: email,
-        authPassword: authPassword,
-      );
+      if (SupabaseService.isInitialized) {
+        await _supabaseService.signIn(
+          email: email,
+          authPassword: authPassword,
+        );
+      }
 
       await prefs.setString(AppConstants.keyMasterSalt, salt);
       await prefs.setString(AppConstants.keyCachedEmail, email);
@@ -190,7 +210,7 @@ class AuthProvider with ChangeNotifier {
   /// Lock Vault (wipes master encryption key from RAM immediately)
   void lockVault() {
     if (_masterKey != null) {
-      _masterKey!.fillRange(0, _masterKey!.length, 0); // Zero out key memory
+      _masterKey!.fillRange(0, _masterKey!.length, 0);
       _masterKey = null;
     }
     _status = VaultLockStatus.lockedWithPass;
@@ -200,7 +220,9 @@ class AuthProvider with ChangeNotifier {
   /// Logout completely
   Future<void> logout() async {
     lockVault();
-    await _supabaseService.signOut();
+    if (SupabaseService.isInitialized) {
+      await _supabaseService.signOut();
+    }
     _currentUserEmail = null;
     _status = VaultLockStatus.lockedWithPass;
     notifyListeners();

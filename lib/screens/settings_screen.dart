@@ -171,12 +171,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final auth = context.read<AuthProvider>();
       final vault = context.read<VaultProvider>();
 
-      // Re-encrypt vault with new key
       try {
         final newSalt = auth.cryptoService.generateSalt();
         final newMasterKey = await auth.cryptoService.deriveMasterKey(newController.text, newSalt);
 
-        // Re-save all items with new key
         final currentItems = List.from(vault.allItems);
         for (final item in currentItems) {
           await vault.saveItem(item);
@@ -280,6 +278,59 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 8),
 
+          // Global Password Expiration Reminder Settings (Item 30)
+          Card(
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: theme.colorScheme.outlineVariant),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(Icons.alarm_on_rounded, color: Colors.blueAccent, size: 22),
+                      SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Şifre Yenileme Hatırlatıcısı (Item 30)', style: TextStyle(fontWeight: FontWeight.bold)),
+                            Text('Eski şifreler için periyodik güncelleme uyarısı', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<int>(
+                    value: auth.globalPasswordExpiryDays,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                      labelText: 'Genel Hatırlatma Aralığı',
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 0, child: Text('Kapalı (Hatırlatma Yok)')),
+                      DropdownMenuItem(value: 30, child: Text('30 Günde Bir')),
+                      DropdownMenuItem(value: 60, child: Text('60 Günde Bir')),
+                      DropdownMenuItem(value: 90, child: Text('90 Günde Bir (Önerilen / Standart)')),
+                      DropdownMenuItem(value: 180, child: Text('180 Günde Bir (6 Ay)')),
+                      DropdownMenuItem(value: 365, child: Text('365 Günde Bir (1 Yıl)')),
+                    ],
+                    onChanged: (val) {
+                      if (val != null) auth.setGlobalPasswordExpiryDays(val);
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+
           // Change Master Password
           Card(
             elevation: 0,
@@ -328,8 +379,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             child: ListTile(
               leading: const Icon(Icons.health_and_safety_outlined, color: Colors.green),
-              title: const Text('Parola Sızıntı & Güvenlik Denetimi'),
-              subtitle: const Text('Sızdırılmış şifreleri (HIBP) ve zayıf parolaları denetle', style: TextStyle(fontSize: 12)),
+              title: const Text('Parola Sızıntı & Sağlık Denetimi'),
+              subtitle: const Text('Sızdırılmış şifreleri (HIBP), süresi dolanları ve zayıf parolaları denetle', style: TextStyle(fontSize: 12)),
               trailing: const Icon(Icons.arrow_forward_ios, size: 14),
               onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AuditScreen())),
             ),
@@ -413,7 +464,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('MultiPad Vault v1.0.0', style: TextStyle(fontWeight: FontWeight.bold)),
+                          Text('MultiPad Vault v1.0.1', style: TextStyle(fontWeight: FontWeight.bold)),
                           SizedBox(height: 2),
                           Text('Yapımcı: WycDev', style: TextStyle(fontSize: 13, color: Colors.blueAccent, fontWeight: FontWeight.w600)),
                         ],

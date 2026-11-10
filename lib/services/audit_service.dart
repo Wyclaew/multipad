@@ -3,7 +3,7 @@ import '../models/vault_item.dart';
 class AuditIssue {
   final String itemId;
   final String title;
-  final String issueType; // 'weak', 'reused', 'missing_2fa'
+  final String issueType; // 'weak', 'reused', 'missing_2fa', 'expired'
   final String description;
   final int severity;    // 1: low, 2: medium, 3: high
 
@@ -22,6 +22,7 @@ class AuditReport {
   final int weakPasswordsCount;
   final int reusedPasswordsCount;
   final int missing2faCount;
+  final int expiredPasswordsCount;
   final List<AuditIssue> issues;
 
   AuditReport({
@@ -30,13 +31,14 @@ class AuditReport {
     required this.weakPasswordsCount,
     required this.reusedPasswordsCount,
     required this.missing2faCount,
+    required this.expiredPasswordsCount,
     required this.issues,
   });
 }
 
 class AuditService {
   /// Evaluates the password health and security of all credentials in the vault.
-  static AuditReport analyzeVault(List<VaultItem> items) {
+  static AuditReport analyzeVault(List<VaultItem> items, {int globalExpiryDays = 90}) {
     final credentials = items.where((i) => i.type == VaultItemType.credential && !i.isTrash && !i.isDeleted).toList();
 
     final List<AuditIssue> issues = [];
@@ -44,6 +46,7 @@ class AuditService {
 
     int weakCount = 0;
     int missing2faCount = 0;
+    int expiredCount = 0;
 
     for (final item in credentials) {
       final pass = item.password;
@@ -79,6 +82,18 @@ class AuditService {
           severity: 1,
         ));
       }
+
+      // Check Password Expiry (Item 30)
+      if (item.isPasswordExpired(globalExpiryDays)) {
+        expiredCount++;
+        issues.add(AuditIssue(
+          itemId: item.id,
+          title: item.title,
+          issueType: 'expired',
+          description: 'Şifre yenileme zamanı geldi (${item.passwordAgeDays} gündür güncellenmedi).',
+          severity: 2,
+        ));
+      }
     }
 
     // Check reused passwords
@@ -101,11 +116,12 @@ class AuditService {
     // Calculate score (0-100)
     int score = 100;
     if (credentials.isNotEmpty) {
-      final weakPenalty = (weakCount / credentials.length) * 45;
-      final reusedPenalty = (reusedCount / credentials.length) * 35;
-      final no2faPenalty = (missing2faCount / credentials.length) * 20;
+      final weakPenalty = (weakCount / credentials.length) * 40;
+      final reusedPenalty = (reusedCount / credentials.length) * 30;
+      final no2faPenalty = (missing2faCount / credentials.length) * 15;
+      final expiredPenalty = (expiredCount / credentials.length) * 15;
 
-      score = (100 - (weakPenalty + reusedPenalty + no2faPenalty)).round().clamp(10, 100);
+      score = (100 - (weakPenalty + reusedPenalty + no2faPenalty + expiredPenalty)).round().clamp(10, 100);
     }
 
     return AuditReport(
@@ -114,6 +130,7 @@ class AuditService {
       weakPasswordsCount: weakCount,
       reusedPasswordsCount: reusedCount,
       missing2faCount: missing2faCount,
+      expiredPasswordsCount: expiredCount,
       issues: issues,
     );
   }
