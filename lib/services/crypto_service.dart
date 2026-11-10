@@ -18,7 +18,7 @@ class EncryptedPayload {
 }
 
 class CryptoService {
-  final AesGcm _aesGcm = AesGcm.with256Bits();
+  final AesGcm _aesGcm = AesGcm.with256bits();
   final Pbkdf2 _pbkdf2 = Pbkdf2(
     macAlgorithm: Hmac.sha256(),
     iterations: AppConstants.pbkdf2Iterations,

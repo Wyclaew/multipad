@@ -3,10 +3,72 @@ import 'package:provider/provider.dart';
 import '../models/vault_item.dart';
 import '../providers/vault_provider.dart';
 import '../services/audit_service.dart';
+import '../services/hibp_service.dart';
 import 'credential_editor_screen.dart';
 
-class AuditScreen extends StatelessWidget {
+class AuditScreen extends StatefulWidget {
   const AuditScreen({super.key});
+
+  @override
+  State<AuditScreen> createState() => _AuditScreenState();
+}
+
+class _AuditScreenState extends State<AuditScreen> {
+  bool _isCheckingBreaches = false;
+  final Map<String, HibpResult> _breachResults = {};
+  final TextEditingController _emailCheckController = TextEditingController();
+
+  @override
+  void dispose() {
+    _emailCheckController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _runBreachCheck() async {
+    final vault = context.read<VaultProvider>();
+    final credentials = vault.allItems
+        .where((i) => i.type == VaultItemType.credential && !i.isTrash && !i.isDeleted)
+        .toList();
+
+    if (credentials.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Taranacak hesap bulunamadı.')),
+      );
+      return;
+    }
+
+    setState(() => _isCheckingBreaches = true);
+
+    int compromisedCount = 0;
+    for (final item in credentials) {
+      if (item.password.trim().isNotEmpty) {
+        final res = await HibpService.checkPasswordBreach(item.password);
+        _breachResults[item.id] = res;
+        if (res.isCompromised) compromisedCount++;
+      }
+    }
+
+    setState(() => _isCheckingBreaches = false);
+
+    if (mounted) {
+      if (compromisedCount > 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('⚠️ Dikkat: $compromisedCount şifreniz bilinen veri sızıntılarında bulundu!'),
+            backgroundColor: Colors.redAccent,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('✅ Harika haber! Hiçbir şifreniz veri sızıntılarında bulunamadı.'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -14,25 +76,29 @@ class AuditScreen extends StatelessWidget {
     final report = AuditService.analyzeVault(vault.allItems);
     final theme = Theme.of(context);
 
+    // Calculate score with breach penalties
+    int compromisedCount = _breachResults.values.where((r) => r.isCompromised).length;
+    int finalScore = (report.overallScore - (compromisedCount * 20)).clamp(5, 100);
+
     Color scoreColor = Colors.green;
     String scoreStatus = 'Mükemmel';
-    if (report.overallScore < 50) {
+    if (finalScore < 50 || compromisedCount > 0) {
       scoreColor = Colors.redAccent;
-      scoreStatus = 'Kritik Risk';
-    } else if (report.overallScore < 75) {
+      scoreStatus = compromisedCount > 0 ? 'Sızıntı Riski Tespit Edildi' : 'Kritik Risk';
+    } else if (finalScore < 75) {
       scoreColor = Colors.orangeAccent;
       scoreStatus = 'Geliştirilmeli';
-    } else if (report.overallScore < 90) {
+    } else if (finalScore < 90) {
       scoreColor = Colors.blueAccent;
       scoreStatus = 'İyi';
     }
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Parola Güvenlik Denetimi'),
+        title: const Text('Parola Sızıntı & Sağlık Denetimi'),
       ),
       body: ListView(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         children: [
           // Score Banner
           Card(
@@ -54,7 +120,7 @@ class AuditScreen extends StatelessWidget {
                     ),
                     child: Center(
                       child: Text(
-                        '${report.overallScore}',
+                        '$finalScore',
                         style: TextStyle(
                           fontSize: 26,
                           fontWeight: FontWeight.bold,
@@ -69,7 +135,7 @@ class AuditScreen extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Kasa Güvenlik Durumu: $scoreStatus',
+                          scoreStatus,
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
@@ -78,10 +144,12 @@ class AuditScreen extends StatelessWidget {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          report.issues.isEmpty
-                              ? 'Tebrikler! Tüm şifreleriniz güçlü ve benzersiz.'
-                              : '${report.issues.length} güvenlik uyarısı tespit edildi.',
-                          style: TextStyle(fontSize: 13, color: theme.colorScheme.onSurfaceVariant),
+                          compromisedCount > 0
+                              ? '$compromisedCount adet şifreniz internetteki veri sızıntılarında bulundu!'
+                              : (report.issues.isEmpty
+                                  ? 'Tüm şifreleriniz güçlü ve benzersiz.'
+                                  : '${report.issues.length} güvenlik iyileştirmesi tespit edildi.'),
+                          style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
                         ),
                       ],
                     ),
@@ -91,34 +159,60 @@ class AuditScreen extends StatelessWidget {
             ),
           ),
 
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
 
-          // 3 Metrics Row
+          // Cloudflare / HIBP Live Breach Scan Action Button
+          FilledButton.icon(
+            style: FilledButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              backgroundColor: Colors.indigo,
+            ),
+            icon: _isCheckingBreaches
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.security_update_warning_rounded),
+            label: Text(
+              _isCheckingBreaches
+                  ? 'Sıfır-Bilgi Sızıntı Taraması Yapılıyor...'
+                  : 'İnternet Veri Sızıntılarını Tara (HIBP / k-Anonymity)',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            onPressed: _isCheckingBreaches ? null : _runBreachCheck,
+          ),
+
+          const SizedBox(height: 16),
+
+          // 4 Metrics Row
           Row(
             children: [
               Expanded(
                 child: _buildMetricTile(
-                  context,
+                  title: 'Sızdırılmış',
+                  count: compromisedCount,
+                  color: Colors.redAccent,
+                  icon: Icons.dangerous_outlined,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildMetricTile(
                   title: 'Zayıf Şifre',
                   count: report.weakPasswordsCount,
-                  color: Colors.redAccent,
+                  color: Colors.orangeAccent,
                   icon: Icons.warning_amber_rounded,
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 8),
               Expanded(
                 child: _buildMetricTile(
-                  context,
                   title: 'Tekrar Eden',
                   count: report.reusedPasswordsCount,
-                  color: Colors.orangeAccent,
+                  color: Colors.amber,
                   icon: Icons.repeat_rounded,
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 8),
               Expanded(
                 child: _buildMetricTile(
-                  context,
                   title: '2FA Eksik',
                   count: report.missing2faCount,
                   color: Colors.blueAccent,
@@ -131,62 +225,33 @@ class AuditScreen extends StatelessWidget {
           const SizedBox(height: 24),
 
           const Text(
-            'GÜVENLİK ÖNERİLERİ & SORUNLAR',
-            style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey, letterSpacing: 1),
+            'DETAYLI GÜVENLİK ANALİZİ & EYLEMLER',
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey, letterSpacing: 1),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
 
-          if (report.issues.isEmpty)
-            Card(
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-                side: BorderSide(color: theme.colorScheme.outlineVariant),
-              ),
-              child: const Padding(
-                padding: EdgeInsets.all(24),
-                child: Center(
-                  child: Column(
-                    children: [
-                      Icon(Icons.check_circle_outline, size: 48, color: Colors.green),
-                      SizedBox(height: 12),
-                      Text(
-                        'Harika! Hiçbir güvenlik sorunu bulunamadı.',
-                        style: TextStyle(fontWeight: FontWeight.w600),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            )
-          else
-            ...report.issues.map((issue) {
+          // Pwned / Compromised items first
+          if (_breachResults.isNotEmpty) ...[
+            ..._breachResults.entries.where((e) => e.value.isCompromised).map((entry) {
+              final item = vault.allItems.firstWhere((i) => i.id == entry.key);
               return Card(
                 elevation: 0,
                 margin: const EdgeInsets.only(bottom: 8),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
-                  side: BorderSide(color: theme.colorScheme.outlineVariant.withOpacity(0.6)),
+                  side: const BorderSide(color: Colors.redAccent, width: 1.5),
                 ),
                 child: ListTile(
-                  leading: Icon(
-                    issue.severity == 3
-                        ? Icons.error_outline_rounded
-                        : issue.severity == 2
-                            ? Icons.warning_amber_rounded
-                            : Icons.info_outline_rounded,
-                    color: issue.severity == 3
-                        ? Colors.redAccent
-                        : issue.severity == 2
-                            ? Colors.orangeAccent
-                            : Colors.blueAccent,
+                  leading: const Icon(Icons.dangerous_rounded, color: Colors.redAccent, size: 28),
+                  title: Text(item.title, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.redAccent)),
+                  subtitle: Text(
+                    '⚠️ Bu şifre internetteki ${entry.value.breachCount} ayrı veri sızıntısında açık olarak bulundu!',
+                    style: const TextStyle(fontSize: 12),
                   ),
-                  title: Text(issue.title, style: const TextStyle(fontWeight: FontWeight.w600)),
-                  subtitle: Text(issue.description, style: const TextStyle(fontSize: 12)),
-                  trailing: TextButton(
-                    child: const Text('Düzelt'),
+                  trailing: FilledButton(
+                    style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+                    child: const Text('Değiştir'),
                     onPressed: () {
-                      final item = vault.allItems.firstWhere((i) => i.id == issue.itemId);
                       Navigator.of(context).push(
                         MaterialPageRoute(builder: (_) => CredentialEditorScreen(initialItem: item)),
                       );
@@ -194,38 +259,74 @@ class AuditScreen extends StatelessWidget {
                   ),
                 ),
               );
-            }).toList(),
+            }),
+          ],
+
+          // Weak / Reused issues
+          ...report.issues.map((issue) {
+            return Card(
+              elevation: 0,
+              margin: const EdgeInsets.only(bottom: 8),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(color: theme.colorScheme.outlineVariant.withOpacity(0.6)),
+              ),
+              child: ListTile(
+                leading: Icon(
+                  issue.severity == 3
+                      ? Icons.error_outline_rounded
+                      : issue.severity == 2
+                          ? Icons.warning_amber_rounded
+                          : Icons.info_outline_rounded,
+                  color: issue.severity == 3
+                      ? Colors.redAccent
+                      : issue.severity == 2
+                          ? Colors.orangeAccent
+                          : Colors.blueAccent,
+                ),
+                title: Text(issue.title, style: const TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: Text(issue.description, style: const TextStyle(fontSize: 12)),
+                trailing: TextButton(
+                  child: const Text('Düzelt'),
+                  onPressed: () {
+                    final item = vault.allItems.firstWhere((i) => i.id == issue.itemId);
+                    Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => CredentialEditorScreen(initialItem: item)),
+                    );
+                  },
+                ),
+              ),
+            );
+          }).toList(),
         ],
       ),
     );
   }
 
-  Widget _buildMetricTile(
-    BuildContext context, {
+  Widget _buildMetricTile({
     required String title,
     required int count,
     required Color color,
     required IconData icon,
   }) {
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: color.withOpacity(0.08),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(10),
         border: Border.all(color: color.withOpacity(0.2)),
       ),
       child: Column(
         children: [
-          Icon(icon, color: color, size: 24),
-          const SizedBox(height: 6),
+          Icon(icon, color: color, size: 20),
+          const SizedBox(height: 4),
           Text(
             '$count',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: color),
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color),
           ),
-          const SizedBox(height: 2),
           Text(
             title,
-            style: const TextStyle(fontSize: 11, color: Colors.grey),
+            style: const TextStyle(fontSize: 10, color: Colors.grey),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
           ),

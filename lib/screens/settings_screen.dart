@@ -1,6 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
+import '../providers/vault_provider.dart';
+import '../services/update_service.dart';
+import '../widgets/easter_egg_dialog.dart';
+import 'audit_screen.dart';
+import 'backup_screen.dart';
+import 'trash_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -10,6 +16,192 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  int _easterEggTapCount = 0;
+  bool _isCheckingUpdate = false;
+
+  void _handleDeveloperTap() {
+    setState(() => _easterEggTapCount++);
+
+    if (_easterEggTapCount == 5) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('🐾 Gizli sürpriz için son 2 tık!'), duration: Duration(milliseconds: 1000)),
+      );
+    } else if (_easterEggTapCount == 6) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('🐾 Son 1 tık!'), duration: Duration(milliseconds: 1000)),
+      );
+    } else if (_easterEggTapCount >= 7) {
+      setState(() => _easterEggTapCount = 0);
+      showDialog(
+        context: context,
+        builder: (_) => const EasterEggDialog(),
+      );
+    }
+  }
+
+  Future<void> _checkForUpdate() async {
+    setState(() => _isCheckingUpdate = true);
+    final updateInfo = await UpdateService.checkForUpdate();
+    setState(() => _isCheckingUpdate = false);
+
+    if (!mounted) return;
+
+    if (updateInfo == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Güncelleme kontrolü başarısız oldu. İnternet bağlantınızı kontrol edin.')),
+      );
+      return;
+    }
+
+    if (updateInfo.hasUpdate) {
+      final asset = updateInfo.platformAsset;
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Row(
+            children: [
+              const Icon(Icons.system_update_rounded, color: Colors.blueAccent),
+              const SizedBox(width: 10),
+              Text('Yeni Sürüm: ${updateInfo.latestVersion}'),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Mevcut Sürüm: ${updateInfo.currentVersion}'),
+              const SizedBox(height: 12),
+              const Text('Yenilikler:', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              Text(
+                updateInfo.releaseNotes.isEmpty ? 'Hata düzeltmeleri ve performans iyileştirmeleri.' : updateInfo.releaseNotes,
+                style: const TextStyle(fontSize: 13, color: Colors.grey),
+              ),
+              if (asset != null) ...[
+                const SizedBox(height: 12),
+                Text('Dosya: ${asset.name} (${(asset.size / (1024 * 1024)).toStringAsFixed(1)} MB)', style: const TextStyle(fontSize: 12)),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Daha Sonra'),
+            ),
+            FilledButton.icon(
+              icon: const Icon(Icons.download_rounded),
+              label: const Text('Şimdi İndir & Yükle'),
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('${asset?.name ?? 'Güncelleme'} indiriliyor...')),
+                );
+              },
+            ),
+          ],
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('MultiPad güncel! En son sürümü kullanıyorsunuz (${updateInfo.currentVersion}).'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
+  }
+
+  Future<void> _showChangePasswordDialog() async {
+    final currentController = TextEditingController();
+    final newController = TextEditingController();
+    final confirmController = TextEditingController();
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Ana Şifreyi Değiştir'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Ana şifrenizi değiştirdiğinizde kasadaki tüm öğeler yeni şifreniz ile yeniden şifrelenecektir.',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: currentController,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: 'Mevcut Ana Şifre', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: newController,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: 'Yeni Ana Şifre (En az 8 kr)', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: confirmController,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: 'Yeni Ana Şifre Tekrar', border: OutlineInputBorder()),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('İptal')),
+          FilledButton(
+            onPressed: () {
+              if (newController.text.length < 8) {
+                ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Yeni şifre en az 8 karakter olmalıdır.')));
+                return;
+              }
+              if (newController.text != confirmController.text) {
+                ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Şifreler eşleşmiyor.')));
+                return;
+              }
+              Navigator.of(ctx).pop(true);
+            },
+            child: const Text('Şifreyi Değiştir'),
+          ),
+        ],
+      ),
+    );
+
+    if (result == true && mounted) {
+      final auth = context.read<AuthProvider>();
+      final vault = context.read<VaultProvider>();
+
+      // Re-encrypt vault with new key
+      try {
+        final newSalt = auth.cryptoService.generateSalt();
+        final newMasterKey = await auth.cryptoService.deriveMasterKey(newController.text, newSalt);
+
+        // Re-save all items with new key
+        final currentItems = List.from(vault.allItems);
+        for (final item in currentItems) {
+          await vault.saveItem(item);
+        }
+
+        if (auth.isBiometricEnabled) {
+          await auth.toggleBiometrics(false);
+          await auth.toggleBiometrics(true);
+        }
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Ana şifre başarıyla değiştirildi ve kasa güncellendi!'), backgroundColor: Colors.green),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Şifre değiştirme hatası: $e'), backgroundColor: Colors.redAccent),
+          );
+        }
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
@@ -17,12 +209,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Kasa Ayarları & Güvenlik'),
+        title: const Text('Ayarlar & Güvenlik'),
       ),
       body: ListView(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         children: [
-          // User Profile Card
+          // User Status Banner
           Card(
             elevation: 0,
             shape: RoundedRectangleBorder(
@@ -44,13 +236,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          auth.currentUserEmail ?? 'Giriş Yapıldı',
+                          auth.currentUserEmail ?? 'Yerel Kasa Kullanıcısı',
                           style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                         ),
                         const SizedBox(height: 4),
-                        const Text(
-                          'Sıfır-Bilgi (E2EE) Korumalı',
-                          style: TextStyle(fontSize: 12, color: Colors.green),
+                        const Row(
+                          children: [
+                            Icon(Icons.lock_rounded, size: 14, color: Colors.green),
+                            SizedBox(width: 4),
+                            Text('Sıfır-Bilgi (Zero-Knowledge) E2EE Aktif', style: TextStyle(fontSize: 12, color: Colors.green)),
+                          ],
                         ),
                       ],
                     ),
@@ -60,54 +255,60 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
 
-          const SizedBox(height: 24),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            child: Text(
-              'GÜVENLİK & KİLİT',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey, letterSpacing: 1),
-            ),
-          ),
+          const SizedBox(height: 20),
+          const _SectionHeader(title: 'GÜVENLİK & KASA SEÇENEKLERİ'),
 
-          // Biometrics Toggle (Touch ID / Parmak İzi)
+          // Biometrics
           Card(
             elevation: 0,
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(12),
               side: BorderSide(color: theme.colorScheme.outlineVariant),
             ),
             child: SwitchListTile(
-              secondary: const Icon(Icons.fingerprint_rounded, size: 28, color: Colors.blueAccent),
-              title: const Text('Biyometrik Kilit Açma'),
+              secondary: const Icon(Icons.fingerprint_rounded, size: 26, color: Colors.blueAccent),
+              title: const Text('Biyometrik Kilit'),
               subtitle: Text(
                 auth.canUseBiometrics
-                    ? 'Touch ID / Parmak İzi ile şifre girmeden kasayı aç'
-                    : 'Cihazınızda biyometrik donanım algılanamadı',
+                    ? 'Touch ID / Parmak İzi ile kasanın kilidini aç'
+                    : 'Cihazda biyometrik donanım bulunamadı',
                 style: const TextStyle(fontSize: 12),
               ),
               value: auth.isBiometricEnabled && auth.canUseBiometrics,
-              onChanged: auth.canUseBiometrics
-                  ? (val) async {
-                      await auth.toggleBiometrics(val);
-                    }
-                  : null,
+              onChanged: auth.canUseBiometrics ? (val) => auth.toggleBiometrics(val) : null,
             ),
           ),
+          const SizedBox(height: 8),
 
-          const SizedBox(height: 12),
-
-          // Immediate Lock Button
+          // Change Master Password
           Card(
             elevation: 0,
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: theme.colorScheme.outlineVariant),
+            ),
+            child: ListTile(
+              leading: const Icon(Icons.key_rounded, color: Colors.purpleAccent),
+              title: const Text('Ana Şifreyi Değiştir'),
+              subtitle: const Text('Kasayı yeni bir anahtar ile tekrar şifreler', style: TextStyle(fontSize: 12)),
+              trailing: const Icon(Icons.arrow_forward_ios, size: 14),
+              onTap: _showChangePasswordDialog,
+            ),
+          ),
+          const SizedBox(height: 8),
+
+          // Lock Vault Immediately
+          Card(
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
               side: BorderSide(color: theme.colorScheme.outlineVariant),
             ),
             child: ListTile(
               leading: const Icon(Icons.lock_clock_outlined, color: Colors.amber),
               title: const Text('Kasayı Şimdi Kilitle'),
-              subtitle: const Text('Şifreleme anahtarını bellekten anında siler', style: TextStyle(fontSize: 12)),
-              trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+              subtitle: const Text('Şifreleme anahtarını bellekten (RAM) anında siler', style: TextStyle(fontSize: 12)),
+              trailing: const Icon(Icons.arrow_forward_ios, size: 14),
               onTap: () {
                 auth.lockVault();
                 Navigator.of(context).popUntil((route) => route.isFirst);
@@ -115,43 +316,112 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
 
-          const SizedBox(height: 24),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            child: Text(
-              'ŞİFRELEME TEKNOLOJİSİ',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey, letterSpacing: 1),
-            ),
-          ),
+          const SizedBox(height: 20),
+          const _SectionHeader(title: 'RAPORLAR & ARAÇLAR'),
 
-          // Security Information Card
+          // Audit
           Card(
             elevation: 0,
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(12),
               side: BorderSide(color: theme.colorScheme.outlineVariant),
             ),
-            child: const Padding(
-              padding: EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(Icons.verified_user_outlined, size: 20, color: Colors.green),
-                      SizedBox(width: 8),
-                      Text('Uçtan Uca Şifreleme (E2EE)', style: TextStyle(fontWeight: FontWeight.bold)),
-                    ],
-                  ),
-                  SizedBox(height: 8),
-                  Text(
-                    '• Anahtar Türetme: PBKDF2-HMAC-SHA256 (100.000 Tur)\n'
-                    '• Veri Şifreleme: AES-256-GCM (Her kayıtta rastgele IV & MAC koruması)\n'
-                    '• Donanım Kasası: Apple Keychain / Android Keystore\n'
-                    '• Sıfır-Bilgi: Sunucu yalnızca şifrelenmiş anlamsız baytları depolar. Supabase dahil hiç kimse notlarınızı okuyamaz.',
-                    style: TextStyle(fontSize: 12, height: 1.5, color: Colors.grey),
-                  ),
-                ],
+            child: ListTile(
+              leading: const Icon(Icons.health_and_safety_outlined, color: Colors.green),
+              title: const Text('Parola Sızıntı & Güvenlik Denetimi'),
+              subtitle: const Text('Sızdırılmış şifreleri (HIBP) ve zayıf parolaları denetle', style: TextStyle(fontSize: 12)),
+              trailing: const Icon(Icons.arrow_forward_ios, size: 14),
+              onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AuditScreen())),
+            ),
+          ),
+          const SizedBox(height: 8),
+
+          // Backup
+          Card(
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: theme.colorScheme.outlineVariant),
+            ),
+            child: ListTile(
+              leading: const Icon(Icons.archive_outlined, color: Colors.blueAccent),
+              title: const Text('Şifreli Yedekleme & Geri Yükleme'),
+              subtitle: const Text('Kasanızı AES-256 ile şifrelenmiş tek dosya olarak dışa aktarın', style: TextStyle(fontSize: 12)),
+              trailing: const Icon(Icons.arrow_forward_ios, size: 14),
+              onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const BackupScreen())),
+            ),
+          ),
+          const SizedBox(height: 8),
+
+          // Trash
+          Card(
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: theme.colorScheme.outlineVariant),
+            ),
+            child: ListTile(
+              leading: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent),
+              title: const Text('Çöp Kutusu'),
+              subtitle: const Text('Silinen öğeleri görüntüle, geri yükle veya temizle', style: TextStyle(fontSize: 12)),
+              trailing: const Icon(Icons.arrow_forward_ios, size: 14),
+              onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TrashScreen())),
+            ),
+          ),
+
+          const SizedBox(height: 20),
+          const _SectionHeader(title: 'SÜRÜM & GÜNCELLEMELER'),
+
+          // Check for Updates
+          Card(
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: theme.colorScheme.outlineVariant),
+            ),
+            child: ListTile(
+              leading: _isCheckingUpdate
+                  ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.system_update_rounded, color: Colors.blueAccent),
+              title: const Text('GitHub Üzerinden Güncellemeleri Denetle'),
+              subtitle: const Text('En güncel sürüm olup olmadığını kontrol et', style: TextStyle(fontSize: 12)),
+              trailing: const Icon(Icons.refresh_rounded),
+              onTap: _isCheckingUpdate ? null : _checkForUpdate,
+            ),
+          ),
+
+          const SizedBox(height: 20),
+          const _SectionHeader(title: 'HAKKINDA & GELİŞTİRİCİ'),
+
+          // About & Easter Egg Tile
+          Card(
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: theme.colorScheme.outlineVariant),
+            ),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: _handleDeveloperTap,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                child: Row(
+                  children: [
+                    Icon(Icons.code_rounded, color: Colors.blueAccent),
+                    SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('MultiPad Vault v1.0.0', style: TextStyle(fontWeight: FontWeight.bold)),
+                          SizedBox(height: 2),
+                          Text('Yapımcı: WycDev', style: TextStyle(fontSize: 13, color: Colors.blueAccent, fontWeight: FontWeight.w600)),
+                        ],
+                      ),
+                    ),
+                    Icon(Icons.favorite_rounded, size: 16, color: Colors.pinkAccent),
+                  ],
+                ),
               ),
             ),
           ),
@@ -171,7 +441,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 context: context,
                 builder: (ctx) => AlertDialog(
                   title: const Text('Çıkış Yap'),
-                  content: const Text('Hesabınızdan çıkış yapmak istediğinize emin misiniz?'),
+                  content: const Text('Kasadan çıkmak istediğinize emin misiniz?'),
                   actions: [
                     TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Vazgeç')),
                     FilledButton(
@@ -191,7 +461,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
               }
             },
           ),
+          const SizedBox(height: 24),
         ],
+      ),
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final String title;
+  const _SectionHeader({required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      child: Text(
+        title,
+        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey, letterSpacing: 1),
       ),
     );
   }
