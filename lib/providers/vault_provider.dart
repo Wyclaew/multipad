@@ -20,7 +20,8 @@ enum VaultCategoryFilter {
 class VaultProvider with ChangeNotifier {
   final CryptoService _cryptoService;
   final SupabaseService _supabaseService;
-  List<int> _masterKey;
+  List<int>? _masterKey;
+  bool _isActive = false;
 
   List<VaultItem> _items = [];
   bool _isLoading = false;
@@ -32,12 +33,12 @@ class VaultProvider with ChangeNotifier {
   VaultProvider({
     required CryptoService cryptoService,
     required SupabaseService supabaseService,
-    required List<int> masterKey,
+    List<int>? masterKey,
   })  : _cryptoService = cryptoService,
-        _supabaseService = supabaseService,
-        _masterKey = List<int>.from(masterKey) {
-    loadVault();
-    _subscribeToRealtime();
+        _supabaseService = supabaseService {
+    if (masterKey != null) {
+      syncAuthState(isUnlocked: true, masterKey: masterKey);
+    }
   }
 
   bool get isLoading => _isLoading;
@@ -46,16 +47,42 @@ class VaultProvider with ChangeNotifier {
   bool get isOnlineSyncActive => _isOnlineSyncActive;
   List<VaultItem> get allItems => List.unmodifiable(_items);
 
+  /// Called cleanly by ChangeNotifierProxyProvider when AuthProvider state changes.
+  /// Avoids recreating VaultProvider and leaking realtime subscriptions on unrelated auth updates.
+  void syncAuthState({required bool isUnlocked, required List<int>? masterKey}) {
+    if (isUnlocked && masterKey != null) {
+      if (_isActive && _masterKey != null) {
+        // Already unlocked; keep active session intact
+        return;
+      }
+      CryptoService.wipe(_masterKey);
+      _masterKey = List<int>.from(masterKey);
+      _isActive = true;
+      loadVault();
+      _subscribeToRealtime();
+    } else {
+      if (!_isActive && _masterKey == null && _items.isEmpty) return;
+      _subscription?.unsubscribe();
+      _subscription = null;
+      CryptoService.wipe(_masterKey);
+      _masterKey = null;
+      _items.clear();
+      _isActive = false;
+      _isOnlineSyncActive = false;
+      _searchQuery = '';
+      notifyListeners();
+    }
+  }
+
   /// Filtered items based on search query and current category filter
   List<VaultItem> get filteredItems {
     return _items.where((item) {
       if (item.isDeleted) return false;
 
-      // Handle trash filter
       if (_currentCategory == VaultCategoryFilter.trash) {
         if (!item.isTrash) return false;
       } else {
-        if (item.isTrash) return false; // Hide trash in normal views
+        if (item.isTrash) return false;
 
         switch (_currentCategory) {
           case VaultCategoryFilter.notes:
@@ -102,35 +129,71 @@ class VaultProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  /// Initial load and decryption of all vault items (Offline-First)
+  /// Initial load and bidirectional merge sync of all vault items (Offline-First)
   Future<void> loadVault() async {
+    if (_masterKey == null) return;
+
     _isLoading = true;
     notifyListeners();
 
     try {
-      List<Map<String, dynamic>> rawRows = [];
+      final localRows = await OfflineStorageService.loadLocalItems();
+      List<Map<String, dynamic>> effectiveRows = localRows;
 
-      // Try fetching from Supabase if connected
       if (SupabaseService.isInitialized && SupabaseService.currentUser != null) {
         try {
-          rawRows = await _supabaseService.fetchVaultItems();
+          final remoteRows = await _supabaseService.fetchVaultItems();
           _isOnlineSyncActive = true;
-          // Cache locally for offline availability
-          await OfflineStorageService.saveAllItems(rawRows);
+
+          // Bidirectional merge by id + client_updated_at timestamp
+          final Map<String, Map<String, dynamic>> merged = {};
+          for (final r in remoteRows) {
+            final id = r['id'] as String?;
+            if (id != null) merged[id] = r;
+          }
+
+          for (final local in localRows) {
+            final id = local['id'] as String?;
+            if (id == null) continue;
+
+            final remote = merged[id];
+            if (remote == null) {
+              // Created offline or paired locally before cloud upload -> push to Supabase
+              if (local['is_deleted'] == true) {
+                await _supabaseService.deleteVaultItem(id);
+              } else {
+                await _supabaseService.upsertVaultItem(local);
+              }
+              merged[id] = local;
+            } else {
+              final localTime = DateTime.tryParse(local['client_updated_at'] as String? ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
+              final remoteTime = DateTime.tryParse(remote['client_updated_at'] as String? ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
+              if (localTime.isAfter(remoteTime)) {
+                if (local['is_deleted'] == true) {
+                  await _supabaseService.deleteVaultItem(id);
+                } else {
+                  await _supabaseService.upsertVaultItem(local);
+                }
+                merged[id] = local;
+              }
+            }
+          }
+
+          effectiveRows = merged.values.toList();
+          await OfflineStorageService.saveAllItems(effectiveRows);
         } catch (e) {
-          debugPrint('Remote fetch failed, falling back to local: $e');
+          debugPrint('Remote fetch/merge failed, falling back to local: $e');
           _isOnlineSyncActive = false;
-          rawRows = await OfflineStorageService.loadLocalItems();
+          effectiveRows = localRows;
         }
       } else {
-        // Fallback to local offline cache
         _isOnlineSyncActive = false;
-        rawRows = await OfflineStorageService.loadLocalItems();
       }
 
       final List<VaultItem> decryptedList = [];
 
-      for (final row in rawRows) {
+      for (final row in effectiveRows) {
+        if (row['is_deleted'] == true) continue;
         try {
           final decrypted = await _decryptRow(row);
           if (decrypted != null && !decrypted.isDeleted) {
@@ -153,7 +216,6 @@ class VaultProvider with ChangeNotifier {
 
   void _sortItems(List<VaultItem> list) {
     list.sort((a, b) {
-      // Pinned items first
       if (a.isPinned && !b.isPinned) return -1;
       if (!a.isPinned && b.isPinned) return 1;
       return b.clientUpdatedAt.compareTo(a.clientUpdatedAt);
@@ -162,19 +224,23 @@ class VaultProvider with ChangeNotifier {
 
   /// Subscribe to Supabase Realtime changes
   void _subscribeToRealtime() {
-    if (!SupabaseService.isInitialized) return;
+    _subscription?.unsubscribe();
+    _subscription = null;
+    if (!SupabaseService.isInitialized || SupabaseService.currentUser == null) return;
 
     _subscription = _supabaseService.subscribeToVaultChanges((payload) async {
+      if (!_isActive || _masterKey == null) return;
       try {
         final record = payload.newRecord;
         if (record.isEmpty) return;
 
         final isDeleted = record['is_deleted'] == true;
-        final id = record['id'] as String;
+        final id = record['id'] as String?;
+        if (id == null) return;
 
         if (isDeleted) {
           _items.removeWhere((item) => item.id == id);
-          await OfflineStorageService.removeLocalItem(id);
+          await OfflineStorageService.upsertLocalItem(record);
           notifyListeners();
           return;
         }
@@ -199,22 +265,23 @@ class VaultProvider with ChangeNotifier {
 
   /// Decrypt a single database record
   Future<VaultItem?> _decryptRow(Map<String, dynamic> row) async {
+    if (_masterKey == null) return null;
     final ciphertext = row['encrypted_payload'] as String?;
     final iv = row['iv'] as String?;
     final mac = row['mac'] as String?;
-    final id = row['id'] as String;
+    final id = row['id'] as String?;
     final itemTypeStr = row['item_type'] as String? ?? 'note';
     final isDeleted = row['is_deleted'] == true;
     final clientUpdatedAtStr = row['client_updated_at'] as String?;
     final updatedAtStr = row['updated_at'] as String?;
 
-    if (ciphertext == null || iv == null || mac == null) return null;
+    if (id == null || ciphertext == null || iv == null || mac == null) return null;
 
     final plainJsonStr = await _cryptoService.decryptData(
       ciphertextBase64: ciphertext,
       ivBase64: iv,
       macBase64: mac,
-      masterKey: _masterKey,
+      masterKey: _masterKey!,
     );
 
     final Map<String, dynamic> payload = jsonDecode(plainJsonStr);
@@ -233,8 +300,9 @@ class VaultProvider with ChangeNotifier {
 
   /// Save or update an item (encrypts before saving)
   Future<void> saveItem(VaultItem item) async {
+    if (_masterKey == null) return;
     final plainJson = item.toPlainJson();
-    final encrypted = await _cryptoService.encryptData(plainJson, _masterKey);
+    final encrypted = await _cryptoService.encryptData(plainJson, _masterKey!);
 
     final itemWithCipher = item.copyWith(
       rawCiphertext: encrypted.ciphertext,
@@ -243,7 +311,6 @@ class VaultProvider with ChangeNotifier {
       clientUpdatedAt: DateTime.now().toUtc(),
     );
 
-    // Optimistic UI update
     final index = _items.indexWhere((i) => i.id == item.id);
     if (index != -1) {
       _items[index] = itemWithCipher;
@@ -253,17 +320,14 @@ class VaultProvider with ChangeNotifier {
     _sortItems(_items);
     notifyListeners();
 
-    // Map for storage
     final storageMap = itemWithCipher.toStorageMap(
       encryptedPayload: encrypted.ciphertext,
       iv: encrypted.iv,
       mac: encrypted.mac,
     );
 
-    // Save to local offline cache
     await OfflineStorageService.upsertLocalItem(storageMap);
 
-    // If online, sync to Supabase
     if (SupabaseService.isInitialized && SupabaseService.currentUser != null) {
       try {
         await _supabaseService.upsertVaultItem(storageMap);
@@ -298,7 +362,6 @@ class VaultProvider with ChangeNotifier {
       );
       updatedStorageList.add(storageMap);
 
-      // If online, update remote record
       if (SupabaseService.isInitialized && SupabaseService.currentUser != null) {
         try {
           await _supabaseService.upsertVaultItem(storageMap);
@@ -308,51 +371,46 @@ class VaultProvider with ChangeNotifier {
       }
     }
 
-    // Save all to local storage
     await OfflineStorageService.saveAllItems(updatedStorageList);
 
-    // Securely replace the in-memory master key
     CryptoService.wipe(_masterKey);
     _masterKey = List<int>.from(newMasterKey);
     notifyListeners();
   }
 
-  /// Toggle item favorite status
   Future<void> toggleFavorite(VaultItem item) async {
-    final updated = item.copyWith(isFavorite: !item.isFavorite);
-    await saveItem(updated);
+    await saveItem(item.copyWith(isFavorite: !item.isFavorite));
   }
 
-  /// Toggle item pin status
   Future<void> togglePin(VaultItem item) async {
-    final updated = item.copyWith(isPinned: !item.isPinned);
-    await saveItem(updated);
+    await saveItem(item.copyWith(isPinned: !item.isPinned));
   }
 
-  /// Move item to Trash
   Future<void> moveToTrash(VaultItem item) async {
-    final updated = item.copyWith(isTrash: true);
-    await saveItem(updated);
+    await saveItem(item.copyWith(isTrash: true));
   }
 
-  /// Restore item from Trash
   Future<void> restoreFromTrash(VaultItem item) async {
-    final updated = item.copyWith(isTrash: false);
-    await saveItem(updated);
+    await saveItem(item.copyWith(isTrash: false));
   }
 
-  /// Permanently delete an item
+  /// Permanently delete an item (writes tombstone locally if offline so remote deletion syncs later)
   Future<void> deleteItem(String id) async {
     _items.removeWhere((item) => item.id == id);
     notifyListeners();
 
-    await OfflineStorageService.removeLocalItem(id);
+    final tombstone = {
+      'id': id,
+      'is_deleted': true,
+      'client_updated_at': DateTime.now().toUtc().toIso8601String(),
+    };
+    await OfflineStorageService.upsertLocalItem(tombstone);
 
     if (SupabaseService.isInitialized && SupabaseService.currentUser != null) {
       try {
         await _supabaseService.deleteVaultItem(id);
       } catch (e) {
-        debugPrint('Remote delete failed: $e');
+        debugPrint('Remote delete failed (tombstone saved for later sync): $e');
       }
     }
   }
@@ -365,7 +423,6 @@ class VaultProvider with ChangeNotifier {
     }
   }
 
-  // Helper factory methods for new empty items
   VaultItem createNewNote() => VaultItem(id: const Uuid().v4(), type: VaultItemType.note, title: '', content: '');
   VaultItem createNewCredential() => VaultItem(id: const Uuid().v4(), type: VaultItemType.credential, title: '');
   VaultItem createNewCard() => VaultItem(id: const Uuid().v4(), type: VaultItemType.card, title: '');
@@ -374,7 +431,6 @@ class VaultProvider with ChangeNotifier {
   @override
   void dispose() {
     _subscription?.unsubscribe();
-    // Memory hygiene: wipe master key and clear decrypted objects from RAM
     CryptoService.wipe(_masterKey);
     _items.clear();
     super.dispose();

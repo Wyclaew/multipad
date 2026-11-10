@@ -20,20 +20,20 @@ class MultiPadApp extends StatelessWidget {
         ChangeNotifierProvider<AuthProvider>(
           create: (_) => AuthProvider()..checkInitialState(),
         ),
-        ChangeNotifierProxyProvider<AuthProvider, VaultProvider?>(
-          create: (_) => null,
-          update: (_, auth, previous) {
-            if (auth.isUnlocked && auth.masterKey != null) {
-              // Create or keep VaultProvider with valid master key
-              return VaultProvider(
-                cryptoService: auth.cryptoService,
-                supabaseService: auth.supabaseService,
-                masterKey: auth.masterKey!,
-              );
-            }
-            // Dispose existing provider on lock
-            previous?.dispose();
-            return null;
+        ChangeNotifierProxyProvider<AuthProvider, VaultProvider>(
+          create: (context) {
+            final auth = context.read<AuthProvider>();
+            return VaultProvider(
+              cryptoService: auth.cryptoService,
+              supabaseService: auth.supabaseService,
+            );
+          },
+          update: (_, auth, vault) {
+            vault!.syncAuthState(
+              isUnlocked: auth.isUnlocked,
+              masterKey: auth.masterKey,
+            );
+            return vault;
           },
         ),
       ],

@@ -1,8 +1,11 @@
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../constants.dart';
 import '../services/biometric_service.dart';
 import '../services/crypto_service.dart';
+import '../services/offline_storage_service.dart';
+import '../services/pairing_service.dart';
 import '../services/supabase_service.dart';
 import 'vault_provider.dart';
 
@@ -46,7 +49,6 @@ class AuthProvider with ChangeNotifier {
     _globalPasswordExpiryDays = prefs.getInt(AppConstants.keyGlobalPasswordExpiryDays) ?? 90;
 
     if (url.trim().isEmpty || anonKey.trim().isEmpty) {
-      // Offline-first: default to locked with pass so local vault works
       _status = VaultLockStatus.lockedWithPass;
       _currentUserEmail = prefs.getString(AppConstants.keyCachedEmail) ?? 'Yerel Kasa Kullanıcısı';
       _canUseBiometrics = await _biometricService.canCheckBiometrics();
@@ -62,6 +64,9 @@ class AuthProvider with ChangeNotifier {
     final initialized = await SupabaseService.initialize();
     if (!initialized) {
       _status = VaultLockStatus.lockedWithPass;
+      _currentUserEmail = prefs.getString(AppConstants.keyCachedEmail);
+      _canUseBiometrics = await _biometricService.canCheckBiometrics();
+      _isBiometricEnabled = await _biometricService.isBiometricUnlockEnabled();
       notifyListeners();
       return;
     }
@@ -91,7 +96,9 @@ class AuthProvider with ChangeNotifier {
     _errorMessage = null;
     final success = await SupabaseService.initialize(customUrl: url, customAnonKey: anonKey);
     if (success) {
-      _status = VaultLockStatus.lockedWithPass;
+      if (_status == VaultLockStatus.needsSetup) {
+        _status = VaultLockStatus.lockedWithPass;
+      }
       notifyListeners();
       return true;
     } else {
@@ -99,6 +106,64 @@ class AuthProvider with ChangeNotifier {
       notifyListeners();
       return false;
     }
+  }
+
+  /// Connects Supabase while already unlocked in local-only mode and auto-syncs vault
+  Future<bool> connectCloudWhileUnlocked({
+    required String url,
+    required String anonKey,
+    required VaultProvider vault,
+  }) async {
+    _errorMessage = null;
+    if (_masterKey == null) {
+      _errorMessage = 'Önce kasanın kilidini açın.';
+      return false;
+    }
+
+    final initialized = await SupabaseService.initialize(customUrl: url, customAnonKey: anonKey);
+    if (!initialized) {
+      _errorMessage = 'Supabase bağlantısı başarısız oldu. URL ve API Anahtarını kontrol edin.';
+      notifyListeners();
+      return false;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final email = (_currentUserEmail ?? prefs.getString(AppConstants.keyCachedEmail) ?? '').trim().toLowerCase();
+    String? salt = prefs.getString(AppConstants.keyMasterSalt);
+
+    if (email.isEmpty || !email.contains('@')) {
+      _errorMessage = 'Bulut hesabı oluşturmak için geçerli bir e-posta ile giriş yapmış olmalısınız.';
+      notifyListeners();
+      return false;
+    }
+
+    if (salt == null) {
+      _errorMessage = 'Yerel kasa tuzu bulunamadı.';
+      notifyListeners();
+      return false;
+    }
+
+    final authPassword = _cryptoService.deriveAuthPassword(_masterKey!);
+
+    try {
+      await _supabaseService.signIn(email: email, authPassword: authPassword);
+    } catch (_) {
+      try {
+        await _supabaseService.signUp(
+          email: email,
+          authPassword: authPassword,
+          masterSalt: salt,
+        );
+      } catch (e) {
+        _errorMessage = 'Bulut oturumu açılamadı: $e';
+        notifyListeners();
+        return false;
+      }
+    }
+
+    await vault.loadVault();
+    notifyListeners();
+    return true;
   }
 
   /// Sign up a new user with Master Password
@@ -125,6 +190,7 @@ class AuthProvider with ChangeNotifier {
 
       _masterKey = derivedKey;
       _currentUserEmail = cleanEmail;
+      _canUseBiometrics = await _biometricService.canCheckBiometrics();
       _status = VaultLockStatus.unlocked;
       notifyListeners();
       return true;
@@ -142,18 +208,25 @@ class AuthProvider with ChangeNotifier {
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      String? salt = prefs.getString(AppConstants.keyMasterSalt);
+      final cachedEmail = prefs.getString(AppConstants.keyCachedEmail)?.trim().toLowerCase();
+      String? salt = (cachedEmail == cleanEmail) ? prefs.getString(AppConstants.keyMasterSalt) : null;
 
       if (salt == null && SupabaseService.isInitialized) {
         salt = await _supabaseService.fetchUserMasterSalt(cleanEmail);
       }
 
-      // Security check: If salt is still null, do NOT invent a random salt!
+      if (salt == null) {
+        // Fallback if single-user offline mode and cachedEmail wasn't set cleanly
+        if (!SupabaseService.isInitialized && prefs.getString(AppConstants.keyMasterSalt) != null && cachedEmail == null) {
+          salt = prefs.getString(AppConstants.keyMasterSalt);
+        }
+      }
+
       if (salt == null) {
         if (SupabaseService.isInitialized) {
           throw Exception('Bu e-posta adresine ait bir hesap bulunamadı. Lütfen kontrol edin veya yeni kasa oluşturun.');
         } else {
-          throw Exception('Cihazda kayıtlı yerel kasa bulunamadı. Lütfen önce "Yeni Kasa Oluştur" seçeneğini kullanın.');
+          throw Exception('Cihazda kayıtlı yerel kasa bulunamadı. Lütfen önce "Yeni Kasa Oluştur" veya "Başka Cihazdan Aktar" seçeneğini kullanın.');
         }
       }
 
@@ -172,11 +245,93 @@ class AuthProvider with ChangeNotifier {
 
       _masterKey = derivedKey;
       _currentUserEmail = cleanEmail;
+      _canUseBiometrics = await _biometricService.canCheckBiometrics();
       _status = VaultLockStatus.unlocked;
       notifyListeners();
       return true;
     } catch (e) {
       _errorMessage = 'Giriş hatası: ${e.toString().replaceAll('Exception: ', '')}';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Builds an encrypted pairing payload to transfer account, Supabase config, and optionally unlocked key
+  Future<PairingPayload> buildPairingPayload({required bool includeUnlockedKey}) async {
+    final prefs = await SharedPreferences.getInstance();
+    final url = prefs.getString(AppConstants.keySupabaseUrl) ?? AppConstants.defaultSupabaseUrl;
+    final anonKey = prefs.getString(AppConstants.keySupabaseAnonKey) ?? AppConstants.defaultSupabaseAnonKey;
+    final salt = prefs.getString(AppConstants.keyMasterSalt) ?? '';
+    final email = _currentUserEmail ?? prefs.getString(AppConstants.keyCachedEmail) ?? '';
+    final localItems = await OfflineStorageService.loadLocalItems();
+
+    return PairingPayload(
+      supabaseUrl: url,
+      supabaseAnonKey: anonKey,
+      email: email,
+      masterSalt: salt,
+      masterKeyBase64: (includeUnlockedKey && _masterKey != null) ? base64Encode(_masterKey!) : null,
+      offlineItems: localItems,
+    );
+  }
+
+  /// Completes setup on a newly paired device (configures Supabase, signs in automatically, syncs items)
+  Future<bool> completePairingSetup(PairingPayload payload) async {
+    _errorMessage = null;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final cleanEmail = payload.email.trim().toLowerCase();
+
+      if (payload.masterSalt.isNotEmpty) {
+        await prefs.setString(AppConstants.keyMasterSalt, payload.masterSalt);
+      }
+      if (cleanEmail.isNotEmpty) {
+        await prefs.setString(AppConstants.keyCachedEmail, cleanEmail);
+        _currentUserEmail = cleanEmail;
+      }
+
+      // 1. Configure & initialize Supabase automatically
+      if (payload.supabaseUrl.trim().isNotEmpty && payload.supabaseAnonKey.trim().isNotEmpty) {
+        await SupabaseService.initialize(
+          customUrl: payload.supabaseUrl.trim(),
+          customAnonKey: payload.supabaseAnonKey.trim(),
+        );
+      }
+
+      // 2. Import encrypted offline items locally
+      for (final rawItem in payload.offlineItems) {
+        await OfflineStorageService.upsertLocalItem(rawItem);
+      }
+
+      _canUseBiometrics = await _biometricService.canCheckBiometrics();
+
+      // 3. If unlocked masterKey was transferred, auto-sign into Supabase & unlock vault directly!
+      if (payload.masterKeyBase64 != null && payload.masterKeyBase64!.isNotEmpty) {
+        final receivedKey = base64Decode(payload.masterKeyBase64!);
+
+        if (SupabaseService.isInitialized && cleanEmail.isNotEmpty) {
+          final authPassword = _cryptoService.deriveAuthPassword(receivedKey);
+          try {
+            await _supabaseService.signIn(
+              email: cleanEmail,
+              authPassword: authPassword,
+            );
+          } catch (signInErr) {
+            debugPrint('Pairing auto sign-in warning (continuing with local vault): $signInErr');
+          }
+        }
+
+        CryptoService.wipe(_masterKey);
+        _masterKey = receivedKey;
+        _status = VaultLockStatus.unlocked;
+      } else {
+        _status = VaultLockStatus.lockedWithPass;
+      }
+
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _errorMessage = 'Cihaz eşleştirme uygulanırken hata oluştu: $e';
       notifyListeners();
       return false;
     }
@@ -236,7 +391,11 @@ class AuthProvider with ChangeNotifier {
 
       // 6. Update Hardware Biometrics if enabled
       if (_isBiometricEnabled) {
-        await _biometricService.enableBiometrics(newMasterKey);
+        try {
+          await _biometricService.enableBiometrics(newMasterKey);
+        } catch (e) {
+          debugPrint('Biometric key rotation warning: $e');
+        }
       }
 
       // 7. Update in-memory master key and wipe old key
@@ -272,21 +431,32 @@ class AuthProvider with ChangeNotifier {
   }
 
   /// Toggle Biometrics
-  Future<void> toggleBiometrics(bool enable) async {
-    if (_masterKey == null) return;
-    if (enable) {
-      final authenticated = await _biometricService.authenticate(
-        reason: 'Parmak İzi / Touch ID ile girişi aktifleştirmek için doğrulayın',
-      );
-      if (authenticated) {
-        await _biometricService.enableBiometrics(_masterKey!);
-        _isBiometricEnabled = true;
+  Future<bool> toggleBiometrics(bool enable) async {
+    _errorMessage = null;
+    if (_masterKey == null) return false;
+    try {
+      if (enable) {
+        final authenticated = await _biometricService.authenticate(
+          reason: 'Parmak İzi / Touch ID ile girişi aktifleştirmek için doğrulayın',
+        );
+        if (authenticated) {
+          await _biometricService.enableBiometrics(_masterKey!);
+          _isBiometricEnabled = true;
+          notifyListeners();
+          return true;
+        }
+        return false;
+      } else {
+        await _biometricService.disableBiometrics();
+        _isBiometricEnabled = false;
+        notifyListeners();
+        return true;
       }
-    } else {
-      await _biometricService.disableBiometrics();
-      _isBiometricEnabled = false;
+    } catch (e) {
+      _errorMessage = 'Biyometrik ayar değiştirilemedi: $e';
+      notifyListeners();
+      return false;
     }
-    notifyListeners();
   }
 
   /// Lock Vault (wipes master encryption key from RAM immediately)
@@ -302,7 +472,6 @@ class AuthProvider with ChangeNotifier {
   /// Logout completely
   Future<void> logout() async {
     lockVault();
-    // Security: disable biometric cached key on explicit logout
     await _biometricService.disableBiometrics();
     _isBiometricEnabled = false;
 

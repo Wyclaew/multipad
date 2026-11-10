@@ -7,39 +7,68 @@ import '../constants.dart';
 class SupabaseService {
   static SupabaseClient? _client;
   static bool _isInitialized = false;
+  static bool _hasSdkInitialized = false;
+  static String? _initializedUrl;
+  static String? _initializedAnonKey;
 
   static SupabaseClient? get client => _client;
   static bool get isInitialized => _isInitialized;
   static User? get currentUser => _client?.auth.currentUser;
 
-  /// Initializes Supabase with either saved configuration, constants, or user-supplied config
+  /// Initializes Supabase with either saved configuration, constants, or user-supplied config.
+  /// Supports clean dynamic re-initialization (e.g. during cross-device pairing).
   static Future<bool> initialize({String? customUrl, String? customAnonKey}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final url = customUrl ??
-          prefs.getString(AppConstants.keySupabaseUrl) ??
-          AppConstants.defaultSupabaseUrl;
-      final anonKey = customAnonKey ??
-          prefs.getString(AppConstants.keySupabaseAnonKey) ??
-          AppConstants.defaultSupabaseAnonKey;
+      final url = (customUrl ??
+              prefs.getString(AppConstants.keySupabaseUrl) ??
+              AppConstants.defaultSupabaseUrl)
+          .trim();
+      final anonKey = (customAnonKey ??
+              prefs.getString(AppConstants.keySupabaseAnonKey) ??
+              AppConstants.defaultSupabaseAnonKey)
+          .trim();
 
-      if (url.trim().isEmpty || anonKey.trim().isEmpty) {
+      if (url.isEmpty || anonKey.isEmpty) {
         _isInitialized = false;
         return false;
       }
 
       // If custom credentials were provided, save them
       if (customUrl != null && customAnonKey != null) {
-        await prefs.setString(AppConstants.keySupabaseUrl, customUrl.trim());
-        await prefs.setString(AppConstants.keySupabaseAnonKey, customAnonKey.trim());
+        await prefs.setString(AppConstants.keySupabaseUrl, url);
+        await prefs.setString(AppConstants.keySupabaseAnonKey, anonKey);
+      }
+
+      // Idempotent fast path if already initialized with same credentials
+      if (_hasSdkInitialized &&
+          _initializedUrl == url &&
+          _initializedAnonKey == anonKey &&
+          _client != null) {
+        _isInitialized = true;
+        return true;
+      }
+
+      // Dispose previous instance if switching projects dynamically
+      if (_hasSdkInitialized) {
+        try {
+          await Supabase.instance.dispose();
+        } catch (e) {
+          debugPrint('Supabase dispose note: $e');
+        }
+        _hasSdkInitialized = false;
+        _client = null;
       }
 
       await Supabase.initialize(
-        url: url.trim(),
-        anonKey: anonKey.trim(),
+        url: url,
+        anonKey: anonKey,
         debug: kDebugMode,
       );
 
+      _hasSdkInitialized = true;
+      _initializedUrl = url;
+      _initializedAnonKey = anonKey;
       _client = Supabase.instance.client;
       _isInitialized = true;
       return true;
@@ -99,7 +128,6 @@ class SupabaseService {
 
     final user = response.user;
     if (user != null) {
-      // Store user's salt in user_profiles
       await _client!.from('user_profiles').upsert({
         'id': user.id,
         'email': cleanEmail,
@@ -129,12 +157,10 @@ class SupabaseService {
   }) async {
     if (_client == null || currentUser == null) return;
 
-    // 1. Update master_salt in user_profiles
     await _client!.from('user_profiles').update({
       'master_salt': newMasterSalt,
     }).eq('id', currentUser!.id);
 
-    // 2. Update Supabase Auth account password
     await _client!.auth.updateUser(
       UserAttributes(password: newAuthPassword),
     );
@@ -147,7 +173,7 @@ class SupabaseService {
     }
   }
 
-  /// Fetch all active vault items for the authenticated user
+  /// Fetch all vault items (including deletion tombstones for accurate offline sync)
   Future<List<Map<String, dynamic>>> fetchVaultItems() async {
     if (_client == null || currentUser == null) return [];
 
@@ -155,7 +181,6 @@ class SupabaseService {
         .from('vault_items')
         .select()
         .eq('user_id', currentUser!.id)
-        .eq('is_deleted', false)
         .order('client_updated_at', ascending: false);
 
     return List<Map<String, dynamic>>.from(response);
@@ -176,9 +201,11 @@ class SupabaseService {
   Future<void> deleteVaultItem(String itemId) async {
     if (_client == null || currentUser == null) return;
 
+    final nowIso = DateTime.now().toUtc().toIso8601String();
     await _client!.from('vault_items').update({
       'is_deleted': true,
-      'updated_at': DateTime.now().toUtc().toIso8601String(),
+      'client_updated_at': nowIso,
+      'updated_at': nowIso,
     }).eq('id', itemId).eq('user_id', currentUser!.id);
   }
 

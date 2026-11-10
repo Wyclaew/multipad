@@ -9,6 +9,7 @@ import 'audit_screen.dart';
 import 'backup_screen.dart';
 import 'card_editor_screen.dart';
 import 'credential_editor_screen.dart';
+import 'device_pairing_screen.dart';
 import 'note_editor_screen.dart';
 import 'secret_editor_screen.dart';
 import 'settings_screen.dart';
@@ -167,6 +168,18 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
             actions: [
+              // Cross-device Quick Pairing
+              IconButton(
+                icon: const Icon(Icons.phonelink_setup_rounded),
+                tooltip: 'Cihaz Eşleştir / Telefona Aktar',
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const DevicePairingScreen(initialRole: PairingRole.send),
+                    ),
+                  );
+                },
+              ),
               // Security Audit
               IconButton(
                 icon: const Icon(Icons.health_and_safety_outlined),

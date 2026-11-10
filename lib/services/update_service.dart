@@ -54,7 +54,7 @@ class UpdateInfo {
 class UpdateService {
   static const String repoOwner = 'Wyclaew';
   static const String repoName = 'multipad';
-  static const String currentAppVersion = '1.0.3';
+  static const String currentAppVersion = '1.0.4';
 
   /// Queries GitHub Releases API to check if a newer release exists.
   static Future<UpdateInfo?> checkForUpdate() async {

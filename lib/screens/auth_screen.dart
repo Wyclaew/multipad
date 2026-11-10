@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
+import 'device_pairing_screen.dart';
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
@@ -58,15 +59,18 @@ class _AuthScreenState extends State<AuthScreen> {
     setState(() => _isLoading = true);
     final auth = context.read<AuthProvider>();
     final success = await auth.configureSupabase(url, key);
+    if (!mounted) return;
     setState(() => _isLoading = false);
 
     if (success) {
       setState(() => _isConfiguringSupabase = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Supabase başarıyla bağlandı!')),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Supabase başarıyla bağlandı!')),
+      );
+    } else if (auth.errorMessage != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(auth.errorMessage!), backgroundColor: Colors.redAccent),
+      );
     }
   }
 
@@ -106,9 +110,10 @@ class _AuthScreenState extends State<AuthScreen> {
       success = await auth.login(email: email, masterPassword: password);
     }
 
+    if (!mounted) return;
     setState(() => _isLoading = false);
 
-    if (!success && mounted && auth.errorMessage != null) {
+    if (!success && auth.errorMessage != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(auth.errorMessage!),
@@ -301,6 +306,9 @@ class _AuthScreenState extends State<AuthScreen> {
         TextField(
           controller: _passwordController,
           obscureText: _obscurePassword,
+          onSubmitted: (_) {
+            if (!_isRegistering && !_isLoading) _handleSubmit();
+          },
           decoration: InputDecoration(
             labelText: 'Ana Şifre (Master Password)',
             prefixIcon: const Icon(Icons.key_rounded),
@@ -317,6 +325,9 @@ class _AuthScreenState extends State<AuthScreen> {
           TextField(
             controller: _confirmPasswordController,
             obscureText: _obscurePassword,
+            onSubmitted: (_) {
+              if (!_isLoading) _handleSubmit();
+            },
             decoration: const InputDecoration(
               labelText: 'Ana Şifre Tekrar',
               prefixIcon: Icon(Icons.lock_reset),
@@ -364,7 +375,31 @@ class _AuthScreenState extends State<AuthScreen> {
                 ),
         ),
 
-        const SizedBox(height: 14),
+        const SizedBox(height: 12),
+
+        // Cross-device Zero-Type Pairing button
+        OutlinedButton.icon(
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+          icon: const Icon(Icons.phonelink_setup_rounded, size: 20),
+          label: const Text(
+            'Başka Cihazdan Hızlı Kurulum / Aktar',
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+          onPressed: _isLoading
+              ? null
+              : () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const DevicePairingScreen(initialRole: PairingRole.receive),
+                    ),
+                  );
+                },
+        ),
+
+        const SizedBox(height: 8),
 
         // Supabase Settings link
         TextButton.icon(

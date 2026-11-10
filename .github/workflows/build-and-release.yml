@@ -34,9 +34,34 @@ jobs:
       - name: Ensure Platform Files
         run: flutter create . --platforms=android --org=com.multipad
 
-      - name: Add Android Permissions
+      - name: Configure Android Manifest & Permissions
         run: |
-          sed -i '/<application/i \    <uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>\n    <uses-permission android:name="android.permission.USE_FINGERPRINT"/>' android/app/src/main/AndroidManifest.xml || true
+          python3 - <<'EOF'
+          path = "android/app/src/main/AndroidManifest.xml"
+          with open(path, "r", encoding="utf-8") as f:
+              xml = f.read()
+
+          xml = xml.replace('android:label="multipad"', 'android:label="MultiPad"')
+
+          perms = [
+              "android.permission.INTERNET",
+              "android.permission.ACCESS_NETWORK_STATE",
+              "android.permission.ACCESS_WIFI_STATE",
+              "android.permission.CHANGE_WIFI_MULTICAST_STATE",
+              "android.permission.USE_BIOMETRIC",
+              "android.permission.USE_FINGERPRINT",
+          ]
+          inject = ""
+          for p in perms:
+              if p not in xml:
+                  inject += f'    <uses-permission android:name="{p}"/>\n'
+
+          if inject:
+              xml = xml.replace("<application", inject + "    <application", 1)
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(xml)
+          EOF
 
       - name: Install Dependencies
         run: flutter pub get
@@ -75,15 +100,42 @@ jobs:
       - name: Ensure Platform Files
         run: flutter create . --platforms=macos --org=com.multipad
 
-      - name: Configure macOS Entitlements (Network & Keychain)
+      - name: Configure macOS Name, Entitlements & Plist
         run: |
-          for file in macos/Runner/DebugProfile.entitlements macos/Runner/Release.entitlements; do
-            if [ -f "$file" ]; then
-              sed -i '' '/<dict>/a\
-              <key>com.apple.security.network.client</key><true/>
-              ' "$file" || true
-            fi
-          done
+          python3 - <<'EOF'
+          import os, plistlib
+
+          app_info = "macos/Runner/Configs/AppInfo.xcconfig"
+          if os.path.exists(app_info):
+              with open(app_info, "r", encoding="utf-8") as f:
+                  txt = f.read()
+              txt = txt.replace("PRODUCT_NAME = multipad", "PRODUCT_NAME = MultiPad")
+              with open(app_info, "w", encoding="utf-8") as f:
+                  f.write(txt)
+
+          # Configure entitlements for direct DMG distribution (no App Store provisioning profile)
+          for ent_path in ["macos/Runner/DebugProfile.entitlements", "macos/Runner/Release.entitlements"]:
+              if os.path.exists(ent_path):
+                  with open(ent_path, "rb") as f:
+                      data = plistlib.load(f)
+                  data["com.apple.security.app-sandbox"] = False
+                  data["com.apple.security.network.client"] = True
+                  data["com.apple.security.network.server"] = True
+                  data["com.apple.security.cs.allow-jit"] = True
+                  with open(ent_path, "wb") as f:
+                      plistlib.dump(data, f)
+
+          # Add Local Network & Touch ID usage descriptions to Info.plist
+          info_plist = "macos/Runner/Info.plist"
+          if os.path.exists(info_plist):
+              with open(info_plist, "rb") as f:
+                  plist_data = plistlib.load(f)
+              plist_data["CFBundleDisplayName"] = "MultiPad"
+              plist_data["NSLocalNetworkUsageDescription"] = "MultiPad ayni Wi-Fi agindaki telefonunuzla sifreli cihaz eslestirmesi yapabilmek icin yerel ag erisimi gerektirir."
+              plist_data["NSFaceIDUsageDescription"] = "MultiPad kasanizi Touch ID ile guvenli sekilde acmak icin kimlik dogrulamasi kullanir."
+              with open(info_plist, "wb") as f:
+                  plistlib.dump(plist_data, f)
+          EOF
 
       - name: Install Dependencies
         run: flutter pub get
@@ -91,10 +143,36 @@ jobs:
       - name: Build macOS App (Release)
         run: flutter build macos --release
 
-      - name: Create DMG File
+      - name: Ad-Hoc Sign & Create DMG Bundle
         run: |
-          hdiutil create -volname "MultiPad" -srcfolder "build/macos/Build/Products/Release/multipad.app" -ov -format UDZO MultiPad-macOS.dmg || \
-          hdiutil create -volname "MultiPad" -srcfolder "build/macos/Build/Products/Release/MultiPad.app" -ov -format UDZO MultiPad-macOS.dmg
+          APP_PATH="build/macos/Build/Products/Release/MultiPad.app"
+          if [ ! -d "$APP_PATH" ]; then
+            APP_PATH="build/macos/Build/Products/Release/multipad.app"
+          fi
+
+          # Apply clean deep ad-hoc code signature for Apple Silicon / Intel compatibility
+          codesign --force --deep --sign - "$APP_PATH"
+
+          mkdir -p dmg_staging
+          cp -R "$APP_PATH" "dmg_staging/MultiPad.app"
+          ln -s /Applications "dmg_staging/Applications"
+
+          cat <<'GUIDE' > "dmg_staging/MACOS_ACMA_KILAVUZU.txt"
+          MultiPad macOS Kurulum & Açma Kılavuzu
+          =====================================
+
+          1. "MultiPad.app" dosyasını yanındaki "Applications" (Uygulamalar) klasörüne sürükleyin.
+          2. Uygulamalar'dan MultiPad'i ilk kez açtığınızda macOS, uygulama ücretli Apple Developer ID sertifikasıyla
+             noter onaylı (notarized) olmadığı için "MultiPad açılmadı / Apple kötü amaçlı yazılım denetimi yapamadı"
+             uyarısı gösterebilir. (Açık kaynaklı bağımsız uygulamalarda normal bir macOS güvenlik adımıdır.)
+          3. Bu uyarıyı tek seferlik onaylamak için:
+             - Uyarı penceresinde "Bitti" (Done) butonuna basın.
+             - Mac ekranınızın sol üstünden Apple Menüsü -> Sistem Ayarları -> Gizlilik ve Güvenlik bölümüne gidin.
+             - En alta kaydırın; "MultiPad açılması engellendi" yazısının yanındaki "Yine de Aç" (Open Anyway) butonuna tıklayın.
+             - Touch ID veya Mac şifrenizle onaylayın. Artık her zaman tek tıkla açılacaktır!
+          GUIDE
+
+          hdiutil create -volname "MultiPad" -srcfolder dmg_staging -ov -format UDZO MultiPad-macOS.dmg
 
       - name: Upload macOS Artifact
         uses: actions/upload-artifact@v4
@@ -208,14 +286,12 @@ jobs:
 
           **İndirme Seçenekleri:**
           - 📱 **Android:** \`MultiPad-Android.apk\`
-          - 🍎 **macOS:** \`MultiPad-macOS.dmg\` (Touch ID destekli)
-          - 🪟 **Windows:** \`MultiPad-Windows.zip\` (Zipten çıkarıp \`MultiPad.exe\` çalıştırın)
+          - 🍎 **macOS:** \`MultiPad-macOS.dmg\` (Applications kısayolu & Touch ID uyumlu)
+          - 🪟 **Windows:** \`MultiPad-Windows.zip\` (Zipten çıkarıp \`multipad.exe\` çalıştırın)
 
-          **Öne Çıkan Özellikler:**
-          - Uçtan Uca Şifreleme (AES-256-GCM + PBKDF2-HMAC-SHA256)
-          - Sıfır-Bilgi Koruması & Çevrimdışı Kasa (Offline-First)
-          - Biyometrik Kilit (Touch ID / Parmak İzi)
-          - Şifre Yenileme Hatırlatıcısı (Genel & Özel Tarihli Hatırlatıcılar)
-          - Have I Been Pwned (HIBP) Sızıntı Denetimi
-          - 256 Karakterlik Gelişmiş Şifre & Diceware Parola Motoru
-          - WycDev Kedi & Konfeti Sürprizi (7 Tık)"
+          **Öne Çıkan Yenilikler ($TAG_NAME):**
+          - 📲 **Aynı Wi-Fi'dan Tek Kodla Cihaz Eşleştirme (Zero-Type Setup):** Ayarları, Supabase anahtarlarını ve şifrelerinizi telefona elle yazmadan X25519 şifreli tünel ve 6 haneli PIN ile anında aktarın
+          - 🔐 **Uçtan Uca Şifreli Uzaktan Aktarım Kodu (\`MPSETUP:\`):** Farklı ağlardan da güvenli aktarım
+          - 🍎 **macOS Keychain & DMG İyileştirmeleri:** Applications kısayolu, ad-hoc imza ve Touch ID Keychain uyumluluğu
+          - 🔄 **Çift Yönlü Çevrimdışı Senkronizasyon (Offline-First Merge)**
+          - 🛡️ **Uçtan Uca Şifreleme (AES-256-GCM + PBKDF2-HMAC-SHA256) & Biyometrik Kilit**"

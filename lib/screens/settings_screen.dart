@@ -1,11 +1,18 @@
+import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../constants.dart';
 import '../providers/auth_provider.dart';
 import '../providers/vault_provider.dart';
+import '../services/clipboard_service.dart';
+import '../services/supabase_service.dart';
 import '../services/update_service.dart';
 import '../widgets/easter_egg_dialog.dart';
 import 'audit_screen.dart';
 import 'backup_screen.dart';
+import 'device_pairing_screen.dart';
 import 'trash_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -39,6 +46,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _openExternalUrl(String url) async {
+    if (kIsWeb) return;
+    try {
+      if (Platform.isMacOS) {
+        await Process.run('open', [url]);
+        return;
+      } else if (Platform.isWindows) {
+        await Process.run('cmd', ['/c', 'start', '', url]);
+        return;
+      }
+    } catch (_) {}
+
+    await ClipboardService.copySecurely(url, timeoutSeconds: 120);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('İndirme bağlantısı panoya kopyalandı: $url')),
+      );
+    }
+  }
+
   Future<void> _checkForUpdate() async {
     setState(() => _isCheckingUpdate = true);
     final updateInfo = await UpdateService.checkForUpdate();
@@ -54,6 +81,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     if (updateInfo.hasUpdate) {
       final asset = updateInfo.platformAsset;
+      final downloadTarget = asset?.downloadUrl.isNotEmpty == true ? asset!.downloadUrl : updateInfo.htmlUrl;
       showDialog(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -89,12 +117,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             FilledButton.icon(
               icon: const Icon(Icons.download_rounded),
-              label: const Text('Şimdi İndir & Yükle'),
-              onPressed: () {
+              label: const Text('Şimdi İndir'),
+              onPressed: () async {
                 Navigator.of(ctx).pop();
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('${asset?.name ?? 'Güncelleme'} indirme adresi: ${updateInfo.htmlUrl}')),
-                );
+                await _openExternalUrl(downloadTarget);
               },
             ),
           ],
@@ -107,6 +133,80 @@ class _SettingsScreenState extends State<SettingsScreen> {
           backgroundColor: Colors.green,
         ),
       );
+    }
+  }
+
+  Future<void> _showCloudSyncDialog() async {
+    final prefs = await SharedPreferences.getInstance();
+    final urlController = TextEditingController(text: prefs.getString(AppConstants.keySupabaseUrl) ?? '');
+    final keyController = TextEditingController(text: prefs.getString(AppConstants.keySupabaseAnonKey) ?? '');
+
+    if (!mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.cloud_sync_outlined, color: Colors.blueAccent),
+            SizedBox(width: 8),
+            Text('Bulut Senkronizasyon (Supabase)'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Cihazlar arası otomatik şifreli eşitleme için Supabase bilgilerinizi girin. Telefona ayrıca yazmak zorunda kalmamak için "Cihaz Eşleştir" özelliğini kullanabilirsiniz.',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: urlController,
+              decoration: const InputDecoration(
+                labelText: 'Supabase Project URL',
+                hintText: 'https://xxxx.supabase.co',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: keyController,
+              decoration: const InputDecoration(
+                labelText: 'Supabase Anon Public Key',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('İptal')),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Bağlan ve Senkronize Et'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      final url = urlController.text.trim();
+      final key = keyController.text.trim();
+      if (url.isEmpty || key.isEmpty) return;
+
+      final auth = context.read<AuthProvider>();
+      final vault = context.read<VaultProvider>();
+      final ok = await auth.connectCloudWhileUnlocked(url: url, anonKey: key, vault: vault);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              ok ? 'Bulut senkronizasyonu bağlandı ve veriler eşitlendi!' : (auth.errorMessage ?? 'Bağlantı başarısız.'),
+            ),
+            backgroundColor: ok ? Colors.green : Colors.redAccent,
+          ),
+        );
+      }
     }
   }
 
@@ -177,7 +277,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final currentPass = currentController.text;
       final newPass = newController.text;
 
-      // Wipe controllers
       currentController.clear();
       newController.clear();
       confirmController.clear();
@@ -212,6 +311,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
     final theme = Theme.of(context);
+    final isCloudConnected = SupabaseService.isInitialized && SupabaseService.currentUser != null;
 
     return Scaffold(
       appBar: AppBar(
@@ -246,11 +346,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                         ),
                         const SizedBox(height: 4),
-                        const Row(
+                        Row(
                           children: [
-                            Icon(Icons.lock_rounded, size: 14, color: Colors.green),
-                            SizedBox(width: 4),
-                            Text('Sıfır-Bilgi (Zero-Knowledge) E2EE Aktif', style: TextStyle(fontSize: 12, color: Colors.green)),
+                            const Icon(Icons.lock_rounded, size: 14, color: Colors.green),
+                            const SizedBox(width: 4),
+                            Text(
+                              isCloudConnected ? 'E2EE & Bulut Senkronu Aktif' : 'Sıfır-Bilgi (Zero-Knowledge) E2EE Aktif',
+                              style: const TextStyle(fontSize: 12, color: Colors.green),
+                            ),
                           ],
                         ),
                       ],
@@ -258,6 +361,55 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ],
               ),
+            ),
+          ),
+
+          const SizedBox(height: 20),
+          const _SectionHeader(title: 'CİHAZLAR ARASI SENKRONİZASYON & AKTARIM'),
+
+          // Device Pairing (Zero-Type Setup & Transfer)
+          Card(
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: Colors.blueAccent.withOpacity(0.45)),
+            ),
+            child: ListTile(
+              leading: const Icon(Icons.phonelink_setup_rounded, color: Colors.blueAccent, size: 28),
+              title: const Text('Yeni Cihaz Eşleştir / Telefona Aktar', style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: const Text(
+                'Aynı Wi-Fi\'dan 6 haneli PIN ile ayarları, şifreleri ve kasayı tek tıkla telefona/bilgisayara aktar',
+                style: TextStyle(fontSize: 12),
+              ),
+              trailing: const Icon(Icons.arrow_forward_ios, size: 14),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const DevicePairingScreen(initialRole: PairingRole.send)),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+
+          // Cloud Sync Config (Supabase)
+          Card(
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: theme.colorScheme.outlineVariant),
+            ),
+            child: ListTile(
+              leading: Icon(
+                isCloudConnected ? Icons.cloud_done_outlined : Icons.cloud_sync_outlined,
+                color: isCloudConnected ? Colors.green : Colors.blueAccent,
+              ),
+              title: const Text('Bulut Senkronizasyon Ayarları (Supabase)'),
+              subtitle: Text(
+                isCloudConnected
+                    ? 'Bulut senkronizasyonu bağlı ve aktif'
+                    : 'Supabase URL ve Anahtarını bağlayarak otomatik eşitlemeyi aç',
+                style: const TextStyle(fontSize: 12),
+              ),
+              trailing: const Icon(Icons.arrow_forward_ios, size: 14),
+              onTap: _showCloudSyncDialog,
             ),
           ),
 
@@ -281,7 +433,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 style: const TextStyle(fontSize: 12),
               ),
               value: auth.isBiometricEnabled && auth.canUseBiometrics,
-              onChanged: auth.canUseBiometrics ? (val) => auth.toggleBiometrics(val) : null,
+              onChanged: auth.canUseBiometrics
+                  ? (val) async {
+                      final ok = await auth.toggleBiometrics(val);
+                      if (!ok && mounted && auth.errorMessage != null) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text(auth.errorMessage!), backgroundColor: Colors.redAccent),
+                        );
+                      }
+                    }
+                  : null,
             ),
           ),
           const SizedBox(height: 8),
@@ -472,7 +633,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('MultiPad Vault v1.0.3', style: TextStyle(fontWeight: FontWeight.bold)),
+                          Text('MultiPad Vault v1.0.4', style: TextStyle(fontWeight: FontWeight.bold)),
                           SizedBox(height: 2),
                           Text('Yapımcı: WycDev', style: TextStyle(fontSize: 13, color: Colors.blueAccent, fontWeight: FontWeight.w600)),
                         ],

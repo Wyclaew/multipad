@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
 import '../constants.dart';
@@ -8,6 +9,7 @@ class BiometricService {
   final FlutterSecureStorage _secureStorage = const FlutterSecureStorage(
     mOptions: MacOsOptions(
       accessibility: KeychainAccessibility.unlocked_this_device,
+      usesDataProtectionKeychain: false, // Prevents -34018 errSecMissingEntitlement on ad-hoc/DMG macOS builds
     ),
     aOptions: AndroidOptions(
       encryptedSharedPreferences: true,
@@ -48,18 +50,24 @@ class BiometricService {
           useErrorDialogs: true,
         ),
       );
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Biometric authenticate error: $e');
       return false;
     }
   }
 
   /// Check if user has enabled biometric unlock in the app
   Future<bool> isBiometricUnlockEnabled() async {
-    final String? enabled = await _secureStorage.read(key: AppConstants.keyBiometricEnabled);
-    return enabled == 'true';
+    try {
+      final String? enabled = await _secureStorage.read(key: AppConstants.keyBiometricEnabled);
+      return enabled == 'true';
+    } catch (e) {
+      debugPrint('SecureStorage read enabled flag error: $e');
+      return false;
+    }
   }
 
-  /// Save Master Key into Hardware Enclave (Keychain / Keystore) protected by biometrics
+  /// Save Master Key into Hardware Enclave / Keychain / Keystore
   Future<void> enableBiometrics(List<int> masterKey) async {
     final String keyBase64 = base64Encode(masterKey);
     await _secureStorage.write(key: AppConstants.keyBiometricMasterKey, value: keyBase64);
@@ -68,8 +76,12 @@ class BiometricService {
 
   /// Disable biometric unlock and purge key from secure storage
   Future<void> disableBiometrics() async {
-    await _secureStorage.delete(key: AppConstants.keyBiometricMasterKey);
-    await _secureStorage.write(key: AppConstants.keyBiometricEnabled, value: 'false');
+    try {
+      await _secureStorage.delete(key: AppConstants.keyBiometricMasterKey);
+      await _secureStorage.write(key: AppConstants.keyBiometricEnabled, value: 'false');
+    } catch (e) {
+      debugPrint('SecureStorage disableBiometrics error: $e');
+    }
   }
 
   /// Retrieve stored Master Key after successful biometric prompt
@@ -82,9 +94,13 @@ class BiometricService {
     );
 
     if (authenticated) {
-      final String? keyBase64 = await _secureStorage.read(key: AppConstants.keyBiometricMasterKey);
-      if (keyBase64 != null) {
-        return base64Decode(keyBase64);
+      try {
+        final String? keyBase64 = await _secureStorage.read(key: AppConstants.keyBiometricMasterKey);
+        if (keyBase64 != null) {
+          return base64Decode(keyBase64);
+        }
+      } catch (e) {
+        debugPrint('SecureStorage retrieve key error: $e');
       }
     }
     return null;
