@@ -1,0 +1,214 @@
+name: MultiPad CI/CD - Build & Release (Android, macOS, Windows)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # -------------------------------------------------------------
+  # 1. BUILD ANDROID APK
+  # -------------------------------------------------------------
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Ensure Platform Files
+        run: flutter create . --platforms=android --org=com.multipad
+
+      - name: Add Android Permissions
+        run: |
+          sed -i '/<application/i \    <uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>\n    <uses-permission android:name="android.permission.USE_FINGERPRINT"/>' android/app/src/main/AndroidManifest.xml || true
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Build APK (Release)
+        run: flutter build apk --release
+
+      - name: Rename APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk MultiPad-Android.apk
+
+      - name: Upload Android Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: MultiPad-Android.apk
+
+  # -------------------------------------------------------------
+  # 2. BUILD MACOS DMG
+  # -------------------------------------------------------------
+  build-macos:
+    name: Build macOS DMG
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Enable macOS Desktop
+        run: flutter config --enable-macos-desktop
+
+      - name: Ensure Platform Files
+        run: flutter create . --platforms=macos --org=com.multipad
+
+      - name: Configure macOS Entitlements (Network & Keychain)
+        run: |
+          # Enable outgoing network in entitlements
+          for file in macos/Runner/DebugProfile.entitlements macos/Runner/Release.entitlements; do
+            if [ -f "$file" ]; then
+              sed -i '' '/<dict>/a\
+              <key>com.apple.security.network.client</key><true/>
+              ' "$file" || true
+            fi
+          done
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Build macOS App (Release)
+        run: flutter build macos --release
+
+      - name: Create DMG File
+        run: |
+          hdiutil create -volname "MultiPad" -srcfolder "build/macos/Build/Products/Release/multipad.app" -ov -format UDZO MultiPad-macOS.dmg || \
+          hdiutil create -volname "MultiPad" -srcfolder "build/macos/Build/Products/Release/MultiPad.app" -ov -format UDZO MultiPad-macOS.dmg
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: MultiPad-macOS.dmg
+
+  # -------------------------------------------------------------
+  # 3. BUILD WINDOWS EXE / ZIP
+  # -------------------------------------------------------------
+  build-windows:
+    name: Build Windows EXE Bundle
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Enable Windows Desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Ensure Platform Files
+        run: flutter create . --platforms=windows --org=com.multipad
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Build Windows Executable (Release)
+        run: flutter build windows --release
+
+      - name: Package Windows Binary (Zip)
+        run: |
+          Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath MultiPad-Windows.zip
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: MultiPad-Windows.zip
+
+  # -------------------------------------------------------------
+  # 4. PUBLISH RELEASE & DELETE PREVIOUS RELEASES
+  # -------------------------------------------------------------
+  release:
+    name: Publish Release & Cleanup Old Versions
+    needs: [build-android, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Android Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: release_assets
+
+      - name: Download macOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-dmg
+          path: release_assets
+
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-zip
+          path: release_assets
+
+      - name: Extract Current Version
+        id: get_version
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}' | tr -d '\r')
+          echo "VERSION=v$VERSION" >> $GITHUB_OUTPUT
+          echo "Current Version: v$VERSION"
+
+      - name: Delete Old Releases & Tags (Keep Only Latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Checking existing releases..."
+          OLD_RELEASES=$(gh release list --json tagName -q '.[].tagName' || true)
+          for tag in $OLD_RELEASES; do
+            echo "Deleting old release: $tag"
+            gh release delete "$tag" --yes --cleanup-tag || true
+          done
+
+      - name: Create New GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${{ steps.get_version.outputs.VERSION }}"
+          gh release create "$TAG_NAME" \
+            release_assets/MultiPad-Android.apk \
+            release_assets/MultiPad-macOS.dmg \
+            release_assets/MultiPad-Windows.zip \
+            --title "MultiPad $TAG_NAME" \
+            --notes "### 🚀 MultiPad En Güncel Sürüm ($TAG_NAME)
+
+          **İndirme Seçenekleri:**
+          - 📱 **Android:** \`MultiPad-Android.apk\` (Doğrudan telefona yüklenebilir)
+          - 🍎 **macOS:** \`MultiPad-macOS.dmg\` (Touch ID destekli)
+          - 🪟 **Windows:** \`MultiPad-Windows.zip\` (Zipten çıkarıp \`MultiPad.exe\` çalıştırın)
+
+          **Güvenlik:**
+          - Uçtan Uca Şifreleme (AES-256-GCM + PBKDF2-HMAC-SHA256)
+          - Sıfır-Bilgi Koruması
+          - Biyometrik Kilit (Touch ID / Parmak İzi)
+          - Dahili 2FA TOTP Kimlik Doğrulayıcı"
