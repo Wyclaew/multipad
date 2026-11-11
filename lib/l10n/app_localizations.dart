@@ -39,6 +39,7 @@ class AppLocalizations {
   String get importPasswords =>
       tr('Diğer Yöneticilerden İçe Aktar', 'Import Passwords');
   String get devicePairing => tr('Cihaz Eşleştirme', 'Device Pairing');
+  String get authenticator => tr('2FA Kodları', '2FA Authenticator');
   String get securityLogs => tr('Güvenlik Olay Günlüğü', 'Security Event Log');
   String get conflictsTitle =>
       tr('Senkronizasyon Çakışmaları', 'Sync Conflicts');

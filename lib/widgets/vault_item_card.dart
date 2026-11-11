@@ -36,6 +36,7 @@ class _VaultItemCardState extends State<VaultItemCard> {
   Timer? _totpTimer;
   String? _currentTotp;
   int _remainingSeconds = 30;
+  int _periodSeconds = 30;
 
   @override
   void initState() {
@@ -48,6 +49,7 @@ class _VaultItemCardState extends State<VaultItemCard> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.item.totpSecret != widget.item.totpSecret) {
       _totpTimer?.cancel();
+      _currentTotp = null;
       _initTotp();
     }
   }
@@ -65,11 +67,11 @@ class _VaultItemCardState extends State<VaultItemCard> {
 
   void _updateTotp() {
     if (!mounted) return;
-    final code = TotpService.generateCode(widget.item.totpSecret);
-    final remaining = TotpService.getRemainingSeconds();
+    final detailed = TotpService.generateDetailed(widget.item.totpSecret);
     setState(() {
-      _currentTotp = code;
-      _remainingSeconds = remaining;
+      _currentTotp = detailed.isValid ? detailed.code : null;
+      _remainingSeconds = detailed.remainingSeconds;
+      _periodSeconds = detailed.period;
     });
   }
 
@@ -193,9 +195,15 @@ class _VaultItemCardState extends State<VaultItemCard> {
 
     String subtitle = '';
     if (item.type == VaultItemType.credential) {
-      subtitle = item.username.isNotEmpty
-          ? item.username
-          : (item.website.isNotEmpty ? item.website : 'Şifre Kaydı');
+      if (item.isTotpOnly) {
+        subtitle = item.username.isNotEmpty
+            ? '${item.username} • 2FA Doğrulayıcı'
+            : '2FA Doğrulayıcı';
+      } else {
+        subtitle = item.username.isNotEmpty
+            ? item.username
+            : (item.website.isNotEmpty ? item.website : 'Şifre Kaydı');
+      }
     } else if (item.type == VaultItemType.card) {
       final cleanNum = item.cardNumber.replaceAll(' ', '');
       final last4 = cleanNum.length >= 4
@@ -409,7 +417,7 @@ class _VaultItemCardState extends State<VaultItemCard> {
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        '${_currentTotp!.substring(0, 3)} ${_currentTotp!.substring(3)}',
+                        TotpService.formatCode(_currentTotp!),
                         style: const TextStyle(
                           fontFamily: 'monospace',
                           fontWeight: FontWeight.bold,
@@ -422,7 +430,9 @@ class _VaultItemCardState extends State<VaultItemCard> {
                         width: 16,
                         height: 16,
                         child: CircularProgressIndicator(
-                          value: _remainingSeconds / 30.0,
+                          value: _periodSeconds > 0
+                              ? _remainingSeconds / _periodSeconds
+                              : 0.0,
                           strokeWidth: 2.5,
                           color: _remainingSeconds <= 5
                               ? Colors.redAccent

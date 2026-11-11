@@ -10,6 +10,7 @@ import '../services/audit_service.dart';
 import '../widgets/quick_search_dialog.dart';
 import '../widgets/vault_item_card.dart';
 import 'audit_screen.dart';
+import 'authenticator_screen.dart';
 import 'card_editor_screen.dart';
 import 'conflicts_screen.dart';
 import 'credential_editor_screen.dart';
@@ -243,6 +244,28 @@ class _HomeScreenState extends State<HomeScreen> {
                   _createNewItem(
                     VaultItemType.secret,
                     folderId: selectedFolderId,
+                  );
+                },
+              ),
+              _AddTile(
+                icon: Icons.phonelink_lock_rounded,
+                color: Colors.indigoAccent,
+                title: l10n.tr(
+                  '2FA Doğrulayıcı Kodu / Aktarım',
+                  '2FA Authenticator / Import',
+                ),
+                subtitle: l10n.tr(
+                  '30 sn TOTP kodu ekle veya Google Auth / Aegis / 2FAS aktar',
+                  'Add 30s TOTP code or migrate from Google Auth / Aegis / 2FAS',
+                ),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const AuthenticatorScreen(
+                        openImportOnStart: true,
+                      ),
+                    ),
                   );
                 },
               ),
@@ -672,7 +695,40 @@ class _HomeScreenState extends State<HomeScreen> {
           selected: vault.currentCategory == VaultCategoryFilter.trash,
           onTap: () => selectCategory(VaultCategoryFilter.trash),
         ),
-        const Divider(height: 24),
+        const Divider(height: 16),
+        ListTile(
+          dense: true,
+          leading: const Icon(
+            Icons.phonelink_lock_rounded,
+            size: 19,
+            color: Colors.indigoAccent,
+          ),
+          title: Text(l10n.authenticator),
+          trailing: Builder(
+            builder: (_) {
+              final totpCount = items
+                  .where(
+                    (i) =>
+                        i.type == VaultItemType.credential &&
+                        i.totpSecret.trim().isNotEmpty,
+                  )
+                  .length;
+              return totpCount > 0
+                  ? Text('$totpCount', style: theme.textTheme.labelSmall)
+                  : const SizedBox.shrink();
+            },
+          ),
+          onTap: () {
+            final nav = Navigator.of(context);
+            if (closeDrawerOnSelect && nav.canPop()) {
+              nav.pop();
+            }
+            nav.push(
+              MaterialPageRoute(builder: (_) => const AuthenticatorScreen()),
+            );
+          },
+        ),
+        const Divider(height: 16),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 8, 4),
           child: Row(
@@ -796,6 +852,15 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
                   actions: [
+                    IconButton(
+                      tooltip: l10n.authenticator,
+                      icon: const Icon(Icons.phonelink_lock_rounded),
+                      onPressed: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const AuthenticatorScreen(),
+                        ),
+                      ),
+                    ),
                     IconButton(
                       tooltip: l10n.tr('Hızlı Arama', 'Quick Search'),
                       icon: const Icon(Icons.bolt_rounded),

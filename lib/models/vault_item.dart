@@ -569,6 +569,11 @@ class VaultItem {
     );
   }
 
+  bool get isTotpOnly =>
+      type == VaultItemType.credential &&
+      password.isEmpty &&
+      totpSecret.trim().isNotEmpty;
+
   int get passwordAgeDays {
     final lastMod = passwordLastModified ?? clientUpdatedAt;
     return DateTime.now().difference(lastMod).inDays;

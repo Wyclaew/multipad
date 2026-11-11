@@ -10,6 +10,7 @@ import '../providers/vault_provider.dart';
 import '../services/audit_service.dart';
 import '../services/clipboard_service.dart';
 import '../services/hibp_service.dart';
+import '../services/totp_migration_service.dart';
 import '../services/totp_service.dart';
 import '../widgets/custom_fields_editor.dart';
 import '../widgets/folder_selector.dart';
@@ -164,10 +165,51 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
     );
     if (raw == null || raw.trim().isEmpty || !mounted) return;
 
-    final parsed = TotpService.parseOtpAuthUri(raw);
+    final trimmedRaw = raw.trim();
+    if (trimmedRaw.toLowerCase().startsWith('otpauth-migration://')) {
+      final mig = TotpMigrationService.parseGoogleMigrationUri(trimmedRaw);
+      if (mig.accounts.length == 1) {
+        final acc = mig.accounts.first;
+        setState(() {
+          _totpController.text = acc.storageTotpValue;
+          if (_titleController.text.trim().isEmpty && acc.issuer.isNotEmpty) {
+            _titleController.text = acc.issuer;
+          }
+          if (_usernameController.text.trim().isEmpty &&
+              acc.accountName.isNotEmpty) {
+            _usernameController.text = acc.accountName;
+          }
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Google Authenticator 2FA hesabı aktarıldı.'),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              mig.accounts.isEmpty
+                  ? (mig.error ?? 'Google Authenticator QR çözümlenemedi.')
+                  : 'Bu Google Authenticator QR kodunda ${mig.accounts.length} hesap var. Hepsini aktarmak için 2FA Kodları -> Aktar ekranını kullanın.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    final parsed = TotpService.parseOtpAuthUri(trimmedRaw);
     if (parsed != null) {
       setState(() {
-        _totpController.text = parsed.secret;
+        _totpController.text = TotpService.formatForVaultStorage(
+          secret: parsed.secret,
+          issuer: parsed.issuer,
+          accountName: parsed.accountName,
+          period: parsed.period,
+          digits: parsed.digits,
+          algorithm: parsed.algorithm,
+        );
         if (_titleController.text.trim().isEmpty && parsed.issuer.isNotEmpty) {
           _titleController.text = parsed.issuer;
         }
@@ -179,8 +221,8 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('2FA (TOTP) anahtarı QR koddan aktarıldı.')),
       );
-    } else if (TotpService.generateCode(raw) != null) {
-      setState(() => _totpController.text = raw.trim());
+    } else if (TotpService.isValidBase32(trimmedRaw)) {
+      setState(() => _totpController.text = TotpService.normalizeBase32(trimmedRaw));
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Base32 2FA anahtarı aktarıldı.')),
       );
@@ -242,7 +284,8 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
     final title = _titleController.text.trim();
     if (title.isEmpty &&
         _usernameController.text.isEmpty &&
-        _passwordController.text.isEmpty) {
+        _passwordController.text.isEmpty &&
+        _totpController.text.trim().isEmpty) {
       Navigator.pop(context);
       return;
     }
@@ -356,9 +399,7 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
     final theme = Theme.of(context);
     final auth = context.watch<AuthProvider>();
     final passHistory = widget.initialItem?.passwordHistory ?? const [];
-    final liveTotp = _totpController.text.trim().isNotEmpty
-        ? TotpService.generateCode(_totpController.text.trim())
-        : null;
+    final liveTotp = TotpService.generateDetailed(_totpController.text.trim());
     final websiteCheck = AuditService.checkWebsiteSecurity(
       _websiteController.text,
     );
@@ -638,7 +679,7 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
                     ),
                   ),
                 ),
-                if (liveTotp != null) ...[
+                if (liveTotp.isValid) ...[
                   const SizedBox(height: 8),
                   Card(
                     color: theme.colorScheme.primary.withValues(alpha: 0.08),
@@ -646,7 +687,7 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
                       dense: true,
                       leading: const Icon(Icons.timer_outlined),
                       title: Text(
-                        '${liveTotp.substring(0, 3)} ${liveTotp.substring(3)}',
+                        liveTotp.formattedCode,
                         style: const TextStyle(
                           fontFamily: 'monospace',
                           fontWeight: FontWeight.bold,
@@ -655,11 +696,11 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
                         ),
                       ),
                       subtitle: Text(
-                        'Kalan süre: ${TotpService.getRemainingSeconds()} sn',
+                        'Kalan süre: ${liveTotp.remainingSeconds} / ${liveTotp.period} sn (${liveTotp.algorithm.uriName})',
                       ),
                       trailing: IconButton(
                         icon: const Icon(Icons.copy, size: 18),
-                        onPressed: () => _copyField(liveTotp, '2FA kodu'),
+                        onPressed: () => _copyField(liveTotp.code, '2FA kodu'),
                       ),
                     ),
                   ),

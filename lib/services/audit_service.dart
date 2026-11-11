@@ -265,6 +265,8 @@ class AuditService {
     final credentials = activeItems
         .where((i) => i.type == VaultItemType.credential)
         .toList();
+    final passwordCredentials =
+        credentials.where((i) => !i.isTotpOnly).toList();
     final cards =
         activeItems.where((i) => i.type == VaultItemType.card).toList();
     final docs = activeItems
@@ -284,6 +286,23 @@ class AuditService {
     int phishingRiskCount = 0;
 
     for (final item in credentials) {
+      if (item.isTotpOnly) {
+        final siteCheck = checkWebsiteSecurity(item.website);
+        if (siteCheck.issueType != null) {
+          if (siteCheck.issueType == 'phishing_risk') {
+            phishingRiskCount++;
+          }
+          issues.add(AuditIssue(
+            itemId: item.id,
+            title: item.title,
+            issueType: siteCheck.issueType!,
+            description: siteCheck.reason!,
+            severity: siteCheck.issueType == 'phishing_risk' ? 3 : 2,
+          ));
+        }
+        continue;
+      }
+
       final pass = item.password;
 
       if (pass.isNotEmpty) {
@@ -417,11 +436,11 @@ class AuditService {
     issues.sort((a, b) => b.severity.compareTo(a.severity));
 
     int score = 100;
-    if (credentials.isNotEmpty) {
-      final weakPenalty = (weakCount / credentials.length) * 35;
-      final reusedPenalty = (reusedCount / credentials.length) * 25;
-      final no2faPenalty = (missing2faCount / credentials.length) * 15;
-      final expiredPenalty = (expiredCount / credentials.length) * 10;
+    if (passwordCredentials.isNotEmpty) {
+      final weakPenalty = (weakCount / passwordCredentials.length) * 35;
+      final reusedPenalty = (reusedCount / passwordCredentials.length) * 25;
+      final no2faPenalty = (missing2faCount / passwordCredentials.length) * 15;
+      final expiredPenalty = (expiredCount / passwordCredentials.length) * 10;
       final phishingPenalty = phishingRiskCount * 8;
       final cardPenalty = (invalidCardsCount + expiringCardsCount) * 5;
 
@@ -441,7 +460,7 @@ class AuditService {
 
     return AuditReport(
       overallScore: score,
-      totalAccounts: credentials.length,
+      totalAccounts: passwordCredentials.length,
       weakPasswordsCount: weakCount,
       reusedPasswordsCount: reusedCount,
       missing2faCount: missing2faCount,

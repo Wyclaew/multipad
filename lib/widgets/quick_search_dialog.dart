@@ -143,8 +143,8 @@ class _QuickSearchDialogState extends State<QuickSearchDialog> {
                         itemBuilder: (ctx, idx) {
                           final item = matches[idx];
                           final totp = item.totpSecret.trim().isNotEmpty
-                              ? TotpService.generateCode(item.totpSecret)
-                              : null;
+                              ? (TotpService.generateCode(item.totpSecret) ?? '')
+                              : '';
 
                           return ListTile(
                             leading: Icon(_iconFor(item.type)),
@@ -177,10 +177,10 @@ class _QuickSearchDialogState extends State<QuickSearchDialog> {
                                     tooltip: l10n.tr('Şifreyi Kopyala', 'Copy Password'),
                                     onPressed: () => _copy(item.password, 'Parola'),
                                   ),
-                                if (totp != null)
+                                if (totp.isNotEmpty)
                                   ActionChip(
                                     label: Text(
-                                      totp,
+                                      TotpService.formatCode(totp),
                                       style: const TextStyle(
                                         fontFamily: 'monospace',
                                         fontWeight: FontWeight.bold,

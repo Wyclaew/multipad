@@ -1,7 +1,7 @@
 // MultiPad Global Configuration Constants
 
 class AppConstants {
-  static const String appVersion = '1.1.0';
+  static const String appVersion = '1.2.0';
   static const int buildNumber = 1;
 
   // Can be configured here or entered directly in the app's Setup / Settings screen.
