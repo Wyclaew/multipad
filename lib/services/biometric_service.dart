@@ -9,7 +9,7 @@ class BiometricService {
   final FlutterSecureStorage _secureStorage = const FlutterSecureStorage(
     mOptions: MacOsOptions(
       accessibility: KeychainAccessibility.unlocked_this_device,
-      usesDataProtectionKeychain: false, // Prevents -34018 errSecMissingEntitlement on ad-hoc/DMG macOS builds
+      useDataProtectionKeyChain: false, // Prevents -34018 errSecMissingEntitlement on ad-hoc/DMG macOS builds
     ),
     aOptions: AndroidOptions(
       encryptedSharedPreferences: true,
