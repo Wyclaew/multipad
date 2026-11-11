@@ -543,7 +543,9 @@ invalid line ignored
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
 
-      expect(nativeCopyCalled, isTrue);
+      final supportsNativeConfidentialCopy =
+          Platform.isAndroid || Platform.isMacOS || Platform.isWindows;
+      expect(nativeCopyCalled, supportsNativeConfidentialCopy);
       expect(fallbackClipboardText, isNotEmpty);
       expect(find.byType(SnackBar), findsOneWidget);
       expect(find.textContaining('10 sn'), findsOneWidget);
