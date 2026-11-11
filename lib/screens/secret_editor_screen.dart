@@ -1,13 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../l10n/app_localizations.dart';
 import '../models/vault_item.dart';
+import '../providers/settings_provider.dart';
 import '../providers/vault_provider.dart';
 import '../services/clipboard_service.dart';
+import '../widgets/custom_fields_editor.dart';
+import '../widgets/folder_selector.dart';
+import '../widgets/revision_history_sheet.dart';
 
 class SecretEditorScreen extends StatefulWidget {
   final VaultItem? initialItem;
+  final String? initialFolderId;
 
-  const SecretEditorScreen({super.key, this.initialItem});
+  const SecretEditorScreen({
+    super.key,
+    this.initialItem,
+    this.initialFolderId,
+  });
 
   @override
   State<SecretEditorScreen> createState() => _SecretEditorScreenState();
@@ -20,22 +30,26 @@ class _SecretEditorScreenState extends State<SecretEditorScreen> {
   late TextEditingController _tagInputController;
   late String _secretType;
   late List<String> _tags;
+  late List<CustomField> _customFields;
+  late List<VaultItemRevision> _revisions;
+  String? _folderId;
+
   late bool _isFavorite;
   late bool _isPinned;
+  bool _obscureSecret = false;
+  bool _isSaving = false;
 
   late String _originalTitle;
   late String _originalSecret;
-
-  bool _obscureSecret = true;
-  bool _isSaving = false;
+  late String? _originalFolderId;
 
   final List<String> _secretTypes = [
-    'API Anahtarı / Token',
-    'SSH Özel Anahtarı (Private Key)',
-    'Kripto Cüzdan Kurtarma Kelimeleri (Seed)',
-    'Veritabanı Bağlantı Dizesi (Connection String)',
-    'Yazılım Lisans Anahtarı',
     'Genel Gizli Bilgi',
+    'API Anahtarı / Token',
+    'Kurtarma İfadesi (Seed Phrase)',
+    'SSH Özel Anahtarı',
+    'Lisans Kodu',
+    'Veritabanı Bağlantısı',
   ];
 
   @override
@@ -53,7 +67,12 @@ class _SecretEditorScreenState extends State<SecretEditorScreen> {
     if (!_secretTypes.contains(_secretType)) {
       _secretTypes.add(_secretType);
     }
-    _tags = List<String>.from(item?.tags ?? []);
+    _tags = List<String>.from(item?.tags ?? const []);
+    _customFields = List<CustomField>.from(item?.customFields ?? const []);
+    _revisions = List<VaultItemRevision>.from(item?.revisions ?? const []);
+    _folderId = item?.folderId ?? widget.initialFolderId;
+    _originalFolderId = _folderId;
+
     _isFavorite = item?.isFavorite ?? false;
     _isPinned = item?.isPinned ?? false;
   }
@@ -67,38 +86,52 @@ class _SecretEditorScreenState extends State<SecretEditorScreen> {
     super.dispose();
   }
 
-  bool get _hasUnsavedChanges {
-    return _titleController.text != _originalTitle ||
-        _secretController.text != _originalSecret;
+  bool get _hasUnsavedChanges =>
+      _titleController.text != _originalTitle ||
+      _secretController.text != _originalSecret ||
+      _folderId != _originalFolderId;
+
+  Future<void> _copySecret(String value, String label) async {
+    final timeout = context.read<SettingsProvider>().clipboardTimeoutSeconds;
+    await ClipboardService.copySecurely(value, timeoutSeconds: timeout);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(context.l10n.copiedWithTimeout(label, timeout))),
+    );
   }
 
-  Future<void> _save() async {
+  Future<void> _saveSecret() async {
     final title = _titleController.text.trim();
     if (title.isEmpty && _secretController.text.isEmpty) {
-      Navigator.of(context).pop();
+      Navigator.pop(context);
       return;
     }
 
     setState(() => _isSaving = true);
     final vault = context.read<VaultProvider>();
-
     final updated = (widget.initialItem ?? vault.createNewSecret()).copyWith(
-      title: title.isEmpty ? 'İsimsiz Gizli Anahtar' : title,
+      title: title.isEmpty ? 'Adsız Gizli Kayıt' : title,
       secretType: _secretType,
       password: _secretController.text.trim(),
       content: _notesController.text.trim(),
+      folderId: _folderId,
+      clearFolderId: _folderId == null,
       tags: _tags,
+      customFields: _customFields,
+      revisions: _revisions,
       isFavorite: _isFavorite,
       isPinned: _isPinned,
-      clientUpdatedAt: DateTime.now().toUtc(),
     );
 
     await vault.saveItem(updated);
     _originalTitle = _titleController.text;
     _originalSecret = _secretController.text;
-    setState(() => _isSaving = false);
+    _originalFolderId = _folderId;
 
-    if (mounted) Navigator.of(context).pop();
+    if (mounted) {
+      setState(() => _isSaving = false);
+      Navigator.pop(context);
+    }
   }
 
   void _addTag(String rawTag) {
@@ -111,222 +144,217 @@ class _SecretEditorScreenState extends State<SecretEditorScreen> {
     }
   }
 
-  void _removeTag(String tag) {
-    setState(() => _tags.remove(tag));
-  }
+  void _removeTag(String tag) => setState(() => _tags.remove(tag));
 
-  Future<void> _delete() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Gizli Veriyi Çöpe Taşı'),
-        content: const Text('Bu gizli anahtarı çöp kutusuna taşımak istediğinize emin misiniz?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Vazgeç')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Çöpe Taşı'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed == true && mounted) {
-      if (widget.initialItem != null) {
-        await context.read<VaultProvider>().moveToTrash(widget.initialItem!);
-      }
-      if (mounted) Navigator.of(context).pop();
-    }
-  }
-
-  Future<bool> _handlePop() async {
+  Future<bool> _confirmDiscard() async {
     if (!_hasUnsavedChanges) return true;
-
-    final shouldDiscard = await showDialog<bool>(
+    final res = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Kaydedilmemiş Değişiklikler'),
-        content: const Text('Gizli anahtar bilgilerinde kaydedilmemiş değişiklikler var. Çıkmak istediğinize emin misiniz?'),
+        content: const Text(
+          'Gizli kayıt değişiklikleri kaydedilmedi. Çıkmak istediğinize emin misiniz?',
+        ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
+            onPressed: () => Navigator.pop(ctx, false),
             child: const Text('Düzenlemeye Devam Et'),
           ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Değişiklikleri Sil'),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Kaydetmeden Çık'),
           ),
         ],
       ),
     );
-
-    return shouldDiscard ?? false;
+    return res ?? false;
   }
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+
     return PopScope(
       canPop: !_hasUnsavedChanges,
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
-        final shouldPop = await _handlePop();
-        if (shouldPop && context.mounted) {
+        final discard = await _confirmDiscard();
+        if (discard && context.mounted) {
           Navigator.of(context).pop();
         }
       },
       child: Scaffold(
         appBar: AppBar(
-          title: Text(widget.initialItem == null ? 'Yeni Gizli Anahtar' : 'Gizli Anahtarı Düzenle'),
+          title: Text(
+            widget.initialItem == null
+                ? l10n.tr('Yeni Gizli Anahtar / Kod', 'New Secret Key')
+                : l10n.tr('Gizli Kaydı Düzenle', 'Edit Secret'),
+          ),
           actions: [
+            if (widget.initialItem != null)
+              IconButton(
+                icon: const Icon(Icons.history),
+                tooltip: l10n.tr('Sürüm Geçmişi', 'Version History'),
+                onPressed: () {
+                  RevisionHistorySheet.show(
+                    context,
+                    item: widget.initialItem!.copyWith(
+                      title: _titleController.text,
+                      password: _secretController.text,
+                      content: _notesController.text,
+                      revisions: _revisions,
+                    ),
+                    onRestore: (rev) {
+                      setState(() {
+                        _titleController.text = rev.title;
+                        if (rev.password.isNotEmpty) {
+                          _secretController.text = rev.password;
+                        }
+                        _notesController.text = rev.content;
+                      });
+                    },
+                  );
+                },
+              ),
             IconButton(
               icon: Icon(_isPinned ? Icons.push_pin : Icons.push_pin_outlined),
-              color: _isPinned ? Colors.blueAccent : null,
-              tooltip: _isPinned ? 'Sabitlemeyi Kaldır' : 'Başa Sabitle',
+              color: _isPinned ? theme.colorScheme.primary : null,
               onPressed: () => setState(() => _isPinned = !_isPinned),
             ),
             IconButton(
-              icon: Icon(_isFavorite ? Icons.star_rounded : Icons.star_outline_rounded),
+              icon: Icon(_isFavorite ? Icons.star : Icons.star_border),
               color: _isFavorite ? Colors.amber : null,
-              tooltip: _isFavorite ? 'Favorilerden Çıkar' : 'Favorilere Ekle',
               onPressed: () => setState(() => _isFavorite = !_isFavorite),
             ),
-            if (widget.initialItem != null)
-              IconButton(
-                icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                tooltip: 'Çöpe Taşı',
-                onPressed: _delete,
-              ),
-            FilledButton.icon(
-              style: FilledButton.styleFrom(visualDensity: VisualDensity.compact),
-              icon: _isSaving
-                  ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Icon(Icons.save_outlined, size: 18),
-              label: const Text('Kaydet'),
-              onPressed: _isSaving ? null : _save,
-            ),
-            const SizedBox(width: 12),
+            if (_isSaving)
+              const Padding(
+                padding: EdgeInsets.all(14),
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              )
+            else
+              IconButton(icon: const Icon(Icons.check), onPressed: _saveSecret),
           ],
         ),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 700),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Title
-                  TextField(
-                    controller: _titleController,
-                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                    decoration: const InputDecoration(
-                      labelText: 'Başlık / Tanım',
-                      hintText: 'Örn: AWS Production Token, SSH RSA Key',
-                      prefixIcon: Icon(Icons.vpn_key_outlined),
-                      border: OutlineInputBorder(),
-                    ),
+        body: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 720),
+            child: ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                TextField(
+                  controller: _titleController,
+                  decoration: const InputDecoration(
+                    labelText: 'Kayıt Başlığı (örn. OpenAI API Key, Ledger 24-Kelime)',
+                    prefixIcon: Icon(Icons.enhanced_encryption),
                   ),
-                  const SizedBox(height: 16),
-
-                  // Secret Type Dropdown
-                  DropdownButtonFormField<String>(
-                    value: _secretType,
-                    decoration: const InputDecoration(
-                      labelText: 'Gizli Veri Türü',
-                      prefixIcon: Icon(Icons.category_outlined),
-                      border: OutlineInputBorder(),
-                    ),
-                    items: _secretTypes.map((type) {
-                      return DropdownMenuItem(value: type, child: Text(type));
-                    }).toList(),
-                    onChanged: (val) {
-                      if (val != null) setState(() => _secretType = val);
-                    },
+                ),
+                const SizedBox(height: 12),
+                FolderSelector(
+                  selectedFolderId: _folderId,
+                  onChanged: (v) => setState(() => _folderId = v),
+                ),
+                const SizedBox(height: 16),
+                DropdownButtonFormField<String>(
+                  initialValue: _secretType,
+                  decoration: const InputDecoration(
+                    labelText: 'Gizli Bilgi Türü',
+                    prefixIcon: Icon(Icons.category_outlined),
                   ),
-                  const SizedBox(height: 16),
-
-                  // Secret Value (Monospace multi-line)
-                  TextField(
-                    controller: _secretController,
-                    obscureText: _obscureSecret,
-                    maxLines: _obscureSecret ? 1 : 6,
-                    style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-                    decoration: InputDecoration(
-                      labelText: 'Gizli Anahtar / Değer',
-                      alignLabelWithHint: true,
-                      prefixIcon: const Icon(Icons.lock_outline),
-                      border: const OutlineInputBorder(),
-                      suffixIcon: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: Icon(_obscureSecret ? Icons.visibility_outlined : Icons.visibility_off_outlined),
-                            tooltip: _obscureSecret ? 'Değeri Göster' : 'Değeri Gizle',
-                            onPressed: () => setState(() => _obscureSecret = !_obscureSecret),
+                  items: _secretTypes
+                      .map((t) => DropdownMenuItem(value: t, child: Text(t)))
+                      .toList(),
+                  onChanged: (val) {
+                    if (val != null) setState(() => _secretType = val);
+                  },
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _secretController,
+                  maxLines: _obscureSecret ? 1 : 5,
+                  minLines: 1,
+                  obscureText: _obscureSecret,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+                  decoration: InputDecoration(
+                    labelText: 'Gizli Değer / Anahtar / Token',
+                    alignLabelWithHint: true,
+                    suffixIcon: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: Icon(
+                            _obscureSecret
+                                ? Icons.visibility
+                                : Icons.visibility_off,
                           ),
-                          IconButton(
-                            icon: const Icon(Icons.copy, size: 18),
-                            tooltip: 'Kopyala (30 sn)',
-                            onPressed: () async {
-                              if (_secretController.text.isNotEmpty) {
-                                await ClipboardService.copySecurely(_secretController.text);
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(content: Text('Gizli değer kopyalandı! (30 sn sonra temizlenir)')),
-                                  );
-                                }
-                              }
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Tags
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      ..._tags.map(
-                        (tag) => Chip(
-                          label: Text('#$tag', style: const TextStyle(fontSize: 12)),
-                          onDeleted: () => _removeTag(tag),
-                          visualDensity: VisualDensity.compact,
+                          onPressed: () =>
+                              setState(() => _obscureSecret = !_obscureSecret),
                         ),
-                      ),
-                      SizedBox(
-                        width: 130,
-                        child: TextField(
-                          controller: _tagInputController,
-                          style: const TextStyle(fontSize: 12),
-                          decoration: const InputDecoration(
-                            hintText: '+ etiket ekle',
-                            border: InputBorder.none,
-                            isDense: true,
-                          ),
-                          onSubmitted: _addTag,
+                        IconButton(
+                          icon: const Icon(Icons.copy),
+                          onPressed: () {
+                            if (_secretController.text.isNotEmpty) {
+                              _copySecret(
+                                _secretController.text,
+                                'Gizli anahtar',
+                              );
+                            }
+                          },
                         ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Extra Notes
-                  TextField(
-                    controller: _notesController,
-                    maxLines: 4,
-                    decoration: const InputDecoration(
-                      labelText: 'Açıklama veya Kullanım Notları',
-                      alignLabelWithHint: true,
-                      border: OutlineInputBorder(),
+                      ],
                     ),
                   ),
-                ],
-              ),
+                ),
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    ..._tags.map(
+                      (tag) => Chip(
+                        label: Text('#$tag', style: const TextStyle(fontSize: 12)),
+                        onDeleted: () => _removeTag(tag),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                    SizedBox(
+                      width: 150,
+                      child: TextField(
+                        controller: _tagInputController,
+                        decoration: const InputDecoration(
+                          hintText: '+ Etiket ekle',
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 8,
+                          ),
+                        ),
+                        onSubmitted: _addTag,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _notesController,
+                  maxLines: 4,
+                  decoration: const InputDecoration(
+                    labelText: 'Açıklama / Kullanım Notları',
+                    alignLabelWithHint: true,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                CustomFieldsEditor(
+                  fields: _customFields,
+                  onChanged: (next) => setState(() => _customFields = next),
+                ),
+              ],
             ),
           ),
         ),

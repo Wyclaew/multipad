@@ -1,9 +1,15 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
+import '../constants.dart';
+import '../models/sync_conflict.dart';
+import '../models/vault_folder.dart';
 import '../models/vault_item.dart';
 import '../services/crypto_service.dart';
+import '../services/native_bridge_service.dart';
 import '../services/offline_storage_service.dart';
 import '../services/supabase_service.dart';
 
@@ -13,110 +19,304 @@ enum VaultCategoryFilter {
   credentials,
   cards,
   secrets,
+  wifi,
+  identity,
+  license,
   favorites,
   trash,
 }
 
+enum SyncMergeDecision {
+  useRemote,
+  pushLocal,
+  markCleanMatching,
+  conflict,
+}
+
 class VaultProvider with ChangeNotifier {
-  final CryptoService _cryptoService;
-  final SupabaseService _supabaseService;
+  final CryptoService _cryptoService = CryptoService();
+  final SupabaseService _supabaseService = SupabaseService();
+  final Uuid _uuid = const Uuid();
+
   List<int>? _masterKey;
   bool _isActive = false;
+  bool _isDuressMode = false;
 
   List<VaultItem> _items = [];
+  List<SyncConflict> _conflicts = [];
   bool _isLoading = false;
+  bool _isSyncingVault = false;
+  bool _reloadRequested = false;
   String _searchQuery = '';
   VaultCategoryFilter _currentCategory = VaultCategoryFilter.all;
+  String? _selectedFolderId;
+  bool _autofillEnabled = true;
+
+  bool _isSelectionMode = false;
+  final Set<String> _selectedItemIds = <String>{};
+
   RealtimeChannel? _subscription;
   bool _isOnlineSyncActive = false;
 
   VaultProvider({
-    required CryptoService cryptoService,
-    required SupabaseService supabaseService,
+    bool isUnlocked = false,
     List<int>? masterKey,
-  })  : _cryptoService = cryptoService,
-        _supabaseService = supabaseService {
-    if (masterKey != null) {
-      syncAuthState(isUnlocked: true, masterKey: masterKey);
+    bool isDuressMode = false,
+  }) {
+    if (isUnlocked && masterKey != null) {
+      syncAuthState(
+        isUnlocked: true,
+        masterKey: masterKey,
+        isDuressMode: isDuressMode,
+      );
     }
   }
 
   bool get isLoading => _isLoading;
+  bool get isDuressMode => _isDuressMode;
   String get searchQuery => _searchQuery;
   VaultCategoryFilter get currentCategory => _currentCategory;
+  String? get selectedFolderId => _selectedFolderId;
   bool get isOnlineSyncActive => _isOnlineSyncActive;
+  bool get isSelectionMode => _isSelectionMode;
+  Set<String> get selectedItemIds => Set.unmodifiable(_selectedItemIds);
+  List<SyncConflict> get conflicts => List.unmodifiable(_conflicts);
+  bool get hasConflicts => _conflicts.isNotEmpty;
+
+  /// Raw decrypted items (excluding permanent tombstones). Includes folders & trash.
   List<VaultItem> get allItems => List.unmodifiable(_items);
 
+  /// Active non-deleted, non-trash content items (excludes folder items).
+  List<VaultItem> get items => _items
+      .where(
+        (i) => !i.isDeleted && !i.isTrash && i.type != VaultItemType.folder,
+      )
+      .toList();
+
+  /// Items currently in Trash.
+  List<VaultItem> get trashItems => _items
+      .where((i) => !i.isDeleted && i.isTrash && i.type != VaultItemType.folder)
+      .toList();
+
+  /// Active folders hierarchy.
+  List<VaultFolder> get folders {
+    final list = _items
+        .where(
+          (i) => !i.isDeleted && !i.isTrash && i.type == VaultItemType.folder,
+        )
+        .map(VaultFolder.fromVaultItem)
+        .toList();
+    list.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return list;
+  }
+
+  void setAutofillEnabledSetting(bool enabled) {
+    if (_autofillEnabled == enabled) return;
+    _autofillEnabled = enabled;
+    syncAutofillIndex(enabled);
+  }
+
+  /// Pure 3-way sync reconciliation decision helper (used by SQLite/cloud sync & unit tests).
+  static SyncMergeDecision reconcileThreeWay({
+    required bool localDirty,
+    required String? baseHash,
+    required String? localHash,
+    required String? remoteHash,
+    required bool localDeleted,
+    required bool remoteDeleted,
+  }) {
+    if (!localDirty) {
+      return SyncMergeDecision.useRemote;
+    }
+    if (localDeleted && remoteDeleted) {
+      return SyncMergeDecision.markCleanMatching;
+    }
+    if (!localDeleted &&
+        !remoteDeleted &&
+        localHash != null &&
+        remoteHash != null &&
+        localHash == remoteHash) {
+      return SyncMergeDecision.markCleanMatching;
+    }
+    if (remoteDeleted && !localDeleted) {
+      return SyncMergeDecision.conflict;
+    }
+    if (baseHash == null || (remoteHash != null && baseHash == remoteHash)) {
+      return SyncMergeDecision.pushLocal;
+    }
+    return SyncMergeDecision.conflict;
+  }
+
+  /// Appends a snapshot of [previous] into [updated.revisions] when content materially changed.
+  static VaultItem withRevisionSnapshot(
+    VaultItem? previous,
+    VaultItem updated, {
+    String summary = '',
+  }) {
+    if (previous == null) return updated;
+    if (previous.computeContentHash() == updated.computeContentHash()) {
+      return updated;
+    }
+    final rev = VaultItemRevision(
+      id: const Uuid().v4(),
+      savedAt: DateTime.now().toUtc(),
+      title: previous.title,
+      content: previous.content,
+      password: previous.password,
+      summary: summary.isNotEmpty
+          ? summary
+          : (previous.type == VaultItemType.credential
+                ? 'Hesap / parola güncellendi'
+                : 'Önceki sürüm'),
+    );
+    final nextRevs = [rev, ...previous.revisions];
+    if (nextRevs.length > VaultItem.maxRevisions) {
+      nextRevs.removeRange(VaultItem.maxRevisions, nextRevs.length);
+    }
+    return updated.copyWith(revisions: nextRevs);
+  }
+
   /// Called cleanly by ChangeNotifierProxyProvider when AuthProvider state changes.
-  /// Avoids recreating VaultProvider and leaking realtime subscriptions on unrelated auth updates.
-  void syncAuthState({required bool isUnlocked, required List<int>? masterKey}) {
+  void syncAuthState({
+    required bool isUnlocked,
+    required List<int>? masterKey,
+    bool isDuressMode = false,
+  }) {
     if (isUnlocked && masterKey != null) {
-      if (_isActive && _masterKey != null) {
-        // Already unlocked; keep active session intact
+      if (_isActive &&
+          _isDuressMode == isDuressMode &&
+          _masterKey != null &&
+          _listEquals(_masterKey!, masterKey)) {
         return;
       }
       CryptoService.wipe(_masterKey);
       _masterKey = List<int>.from(masterKey);
       _isActive = true;
+      _isDuressMode = isDuressMode;
+      if (_isDuressMode) {
+        _subscription?.unsubscribe();
+        _subscription = null;
+        _isOnlineSyncActive = false;
+        NativeBridgeService.clearAutofillIndex();
+      } else {
+        _subscribeToRealtime();
+      }
       loadVault();
-      _subscribeToRealtime();
     } else {
       if (!_isActive && _masterKey == null && _items.isEmpty) return;
-      _subscription?.unsubscribe();
-      _subscription = null;
+      _isActive = false;
+      _isDuressMode = false;
       CryptoService.wipe(_masterKey);
       _masterKey = null;
-      _items.clear();
-      _isActive = false;
+      _items = [];
+      _conflicts = [];
+      _selectedFolderId = null;
+      _selectedItemIds.clear();
+      _isSelectionMode = false;
       _isOnlineSyncActive = false;
-      _searchQuery = '';
+      _subscription?.unsubscribe();
+      _subscription = null;
       notifyListeners();
     }
   }
 
-  /// Filtered items based on search query and current category filter
-  List<VaultItem> get filteredItems {
-    return _items.where((item) {
-      if (item.isDeleted) return false;
+  bool _listEquals(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
 
-      if (_currentCategory == VaultCategoryFilter.trash) {
-        if (!item.isTrash) return false;
-      } else {
-        if (item.isTrash) return false;
-
-        switch (_currentCategory) {
-          case VaultCategoryFilter.notes:
-            if (item.type != VaultItemType.note) return false;
-            break;
-          case VaultCategoryFilter.credentials:
-            if (item.type != VaultItemType.credential) return false;
-            break;
-          case VaultCategoryFilter.cards:
-            if (item.type != VaultItemType.card) return false;
-            break;
-          case VaultCategoryFilter.secrets:
-            if (item.type != VaultItemType.secret) return false;
-            break;
-          case VaultCategoryFilter.favorites:
-            if (!item.isFavorite) return false;
-            break;
-          case VaultCategoryFilter.all:
-          default:
-            break;
+  Set<String> getDescendantFolderIds(String rootFolderId) {
+    final allFolders = folders;
+    final Set<String> result = {rootFolderId};
+    final List<String> queue = [rootFolderId];
+    while (queue.isNotEmpty) {
+      final current = queue.removeAt(0);
+      for (final f in allFolders) {
+        if (f.parentId == current && !result.contains(f.id)) {
+          result.add(f.id);
+          queue.add(f.id);
         }
       }
+    }
+    return result;
+  }
 
-      if (_searchQuery.trim().isEmpty) return true;
-      final q = _searchQuery.toLowerCase();
-      final titleMatch = item.title.toLowerCase().contains(q);
-      final contentMatch = item.content.toLowerCase().contains(q);
-      final usernameMatch = item.username.toLowerCase().contains(q);
-      final websiteMatch = item.website.toLowerCase().contains(q);
-      final cardMatch = item.cardNumber.contains(q) || item.cardHolder.toLowerCase().contains(q);
-      final tagMatch = item.tags.any((t) => t.toLowerCase().contains(q));
+  List<VaultItem> get filteredItems {
+    Iterable<VaultItem> result = _items.where(
+      (i) => !i.isDeleted && i.type != VaultItemType.folder,
+    );
 
-      return titleMatch || contentMatch || usernameMatch || websiteMatch || cardMatch || tagMatch;
-    }).toList();
+    if (_currentCategory == VaultCategoryFilter.trash) {
+      result = result.where((i) => i.isTrash);
+    } else {
+      result = result.where((i) => !i.isTrash);
+
+      if (_selectedFolderId != null) {
+        final allowedFolders = getDescendantFolderIds(_selectedFolderId!);
+        result = result.where(
+          (i) => i.folderId != null && allowedFolders.contains(i.folderId),
+        );
+      }
+
+      switch (_currentCategory) {
+        case VaultCategoryFilter.notes:
+          result = result.where((i) => i.type == VaultItemType.note);
+          break;
+        case VaultCategoryFilter.credentials:
+          result = result.where((i) => i.type == VaultItemType.credential);
+          break;
+        case VaultCategoryFilter.cards:
+          result = result.where((i) => i.type == VaultItemType.card);
+          break;
+        case VaultCategoryFilter.secrets:
+          result = result.where((i) => i.type == VaultItemType.secret);
+          break;
+        case VaultCategoryFilter.wifi:
+          result = result.where((i) => i.type == VaultItemType.wifi);
+          break;
+        case VaultCategoryFilter.identity:
+          result = result.where((i) => i.type == VaultItemType.identity);
+          break;
+        case VaultCategoryFilter.license:
+          result = result.where((i) => i.type == VaultItemType.license);
+          break;
+        case VaultCategoryFilter.favorites:
+          result = result.where((i) => i.isFavorite);
+          break;
+        case VaultCategoryFilter.all:
+        case VaultCategoryFilter.trash:
+          break;
+      }
+    }
+
+    if (_searchQuery.trim().isNotEmpty) {
+      final q = _searchQuery.toLowerCase().trim();
+      result = result.where((i) {
+        final inFields = i.customFields.any(
+          (f) =>
+              f.label.toLowerCase().contains(q) ||
+              (!f.isHidden && f.value.toLowerCase().contains(q)),
+        );
+        return i.title.toLowerCase().contains(q) ||
+            i.content.toLowerCase().contains(q) ||
+            i.username.toLowerCase().contains(q) ||
+            i.website.toLowerCase().contains(q) ||
+            i.cardHolder.toLowerCase().contains(q) ||
+            i.wifiSsid.toLowerCase().contains(q) ||
+            i.fullName.toLowerCase().contains(q) ||
+            i.idNumber.toLowerCase().contains(q) ||
+            i.productName.toLowerCase().contains(q) ||
+            i.tags.any((t) => t.toLowerCase().contains(q)) ||
+            inFields;
+      });
+    }
+
+    final list = result.toList();
+    _sortItems(list);
+    return list;
   }
 
   void setSearchQuery(String query) {
@@ -129,89 +329,426 @@ class VaultProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  /// Initial load and bidirectional merge sync of all vault items (Offline-First)
+  void setSelectedFolder(String? folderId) {
+    _selectedFolderId = folderId;
+    if (folderId != null && _currentCategory == VaultCategoryFilter.trash) {
+      _currentCategory = VaultCategoryFilter.all;
+    }
+    notifyListeners();
+  }
+
+  // --- Multi-Selection Mode ---
+
+  void enterSelectionMode(String initialId) {
+    _isSelectionMode = true;
+    _selectedItemIds.add(initialId);
+    notifyListeners();
+  }
+
+  void toggleSelection(String id) {
+    if (_selectedItemIds.contains(id)) {
+      _selectedItemIds.remove(id);
+      if (_selectedItemIds.isEmpty) {
+        _isSelectionMode = false;
+      }
+    } else {
+      _isSelectionMode = true;
+      _selectedItemIds.add(id);
+    }
+    notifyListeners();
+  }
+
+  void selectAllFiltered() {
+    _isSelectionMode = true;
+    for (final item in filteredItems) {
+      _selectedItemIds.add(item.id);
+    }
+    notifyListeners();
+  }
+
+  void clearSelection() {
+    _selectedItemIds.clear();
+    _isSelectionMode = false;
+    notifyListeners();
+  }
+
+  Future<void> moveItemsToFolder(
+    Iterable<String> ids,
+    String? targetFolderId,
+  ) async {
+    final targetIds = ids.toSet();
+    for (final item in _items.where((i) => targetIds.contains(i.id)).toList()) {
+      await saveItem(
+        item.copyWith(
+          folderId: targetFolderId,
+          clearFolderId: targetFolderId == null,
+        ),
+      );
+    }
+    clearSelection();
+  }
+
+  Future<void> moveItemsToTrash(Iterable<String> ids) async {
+    final targetIds = ids.toSet();
+    for (final item in _items.where((i) => targetIds.contains(i.id)).toList()) {
+      await moveToTrash(item);
+    }
+    clearSelection();
+  }
+
+  Future<void> deleteItemsPermanently(Iterable<String> ids) async {
+    final targetIds = ids.toSet();
+    for (final id in targetIds) {
+      await deleteItem(id);
+    }
+    clearSelection();
+  }
+
+  // --- Load & 3-Way Sync ---
+
   Future<void> loadVault() async {
     if (_masterKey == null) return;
+    if (_isSyncingVault) {
+      _reloadRequested = true;
+      return;
+    }
 
+    _isSyncingVault = true;
     _isLoading = true;
     notifyListeners();
 
     try {
+      if (_isDuressMode) {
+        await _loadDuressVault();
+        return;
+      }
+
+      // 1. Load SQLite cache & decrypt local items
       final localRows = await OfflineStorageService.loadLocalItems();
-      List<Map<String, dynamic>> effectiveRows = localRows;
+      final Map<String, Map<String, dynamic>> localById = {};
+      final Map<String, VaultItem?> localDecryptedById = {};
+      for (final r in localRows) {
+        final id = r['id'] as String?;
+        if (id == null || id.isEmpty) continue;
+        localById[id] = r;
+        localDecryptedById[id] = await _decryptRow(r);
+      }
+
+      final List<SyncConflict> detectedConflicts = [];
+      final Map<String, VaultItem> finalVisibleItems = {};
 
       if (SupabaseService.isInitialized && SupabaseService.currentUser != null) {
         try {
           final remoteRows = await _supabaseService.fetchVaultItems();
           _isOnlineSyncActive = true;
 
-          // Bidirectional merge by id + client_updated_at timestamp
-          final Map<String, Map<String, dynamic>> merged = {};
+          final Map<String, Map<String, dynamic>> remoteById = {};
+          final Map<String, VaultItem?> remoteDecryptedById = {};
           for (final r in remoteRows) {
             final id = r['id'] as String?;
-            if (id != null) merged[id] = r;
+            if (id == null || id.isEmpty) continue;
+            remoteById[id] = r;
+            remoteDecryptedById[id] = await _decryptRow(r);
           }
 
-          for (final local in localRows) {
-            final id = local['id'] as String?;
-            if (id == null) continue;
+          final allIds = {...localById.keys, ...remoteById.keys};
 
-            final remote = merged[id];
-            if (remote == null) {
-              // Created offline or paired locally before cloud upload -> push to Supabase
-              if (local['is_deleted'] == true) {
-                await _supabaseService.deleteVaultItem(id);
-              } else {
-                await _supabaseService.upsertVaultItem(local);
-              }
-              merged[id] = local;
-            } else {
-              final localTime = DateTime.tryParse(local['client_updated_at'] as String? ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
-              final remoteTime = DateTime.tryParse(remote['client_updated_at'] as String? ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
-              if (localTime.isAfter(remoteTime)) {
+          for (final id in allIds) {
+            final local = localById[id];
+            final remote = remoteById[id];
+            final localItem = localDecryptedById[id];
+            final remoteItem = remoteDecryptedById[id];
+
+            if (local != null && remote == null) {
+              final localDirty = local['dirty'] == true;
+              final baseHash = local['base_hash'] as String?;
+              if (localDirty || baseHash == null) {
                 if (local['is_deleted'] == true) {
                   await _supabaseService.deleteVaultItem(id);
+                  await OfflineStorageService.removeLocalItem(id);
                 } else {
                   await _supabaseService.upsertVaultItem(local);
+                  final hash = localItem?.computeContentHash() ?? '';
+                  await OfflineStorageService.markItemSynced(id, hash);
+                  if (localItem != null && !localItem.isDeleted) {
+                    finalVisibleItems[id] = localItem;
+                  }
                 }
-                merged[id] = local;
+              } else {
+                // Previously synced cleanly and hard-removed remotely
+                await OfflineStorageService.removeLocalItem(id);
+              }
+            } else if (local == null && remote != null) {
+              final rHash = remoteItem?.computeContentHash() ?? '';
+              await OfflineStorageService.upsertLocalItem(
+                remote,
+                dirty: false,
+                baseHash: rHash,
+              );
+              if (remoteItem != null && !remoteItem.isDeleted) {
+                finalVisibleItems[id] = remoteItem;
+              }
+            } else if (local != null && remote != null) {
+              final localDirty = local['dirty'] == true;
+              final baseHash = local['base_hash'] as String?;
+              final localDeleted = local['is_deleted'] == true;
+              final remoteDeleted = remote['is_deleted'] == true;
+              final localHash = localItem?.computeContentHash();
+              final remoteHash = remoteItem?.computeContentHash();
+
+              final decision = reconcileThreeWay(
+                localDirty: localDirty,
+                baseHash: baseHash,
+                localHash: localHash,
+                remoteHash: remoteHash,
+                localDeleted: localDeleted,
+                remoteDeleted: remoteDeleted,
+              );
+
+              switch (decision) {
+                case SyncMergeDecision.useRemote:
+                case SyncMergeDecision.markCleanMatching:
+                  await OfflineStorageService.upsertLocalItem(
+                    remote,
+                    dirty: false,
+                    baseHash: remoteHash ?? '',
+                  );
+                  if (remoteItem != null && !remoteItem.isDeleted) {
+                    finalVisibleItems[id] = remoteItem;
+                  }
+                  break;
+                case SyncMergeDecision.pushLocal:
+                  if (localDeleted) {
+                    await _supabaseService.deleteVaultItem(id);
+                    await OfflineStorageService.markItemSynced(
+                      id,
+                      localHash ?? '',
+                    );
+                  } else {
+                    await _supabaseService.upsertVaultItem(local);
+                    await OfflineStorageService.markItemSynced(
+                      id,
+                      localHash ?? '',
+                    );
+                    if (localItem != null && !localItem.isDeleted) {
+                      finalVisibleItems[id] = localItem;
+                    }
+                  }
+                  break;
+                case SyncMergeDecision.conflict:
+                  if (localItem != null && remoteItem != null) {
+                    detectedConflicts.add(
+                      SyncConflict(
+                        itemId: id,
+                        localItem: localItem,
+                        remoteItem: remoteItem,
+                      ),
+                    );
+                    // Preserve local draft visibly while awaiting resolution
+                    if (!localItem.isDeleted) {
+                      finalVisibleItems[id] = localItem;
+                    }
+                  } else if (remoteItem != null && !remoteItem.isDeleted) {
+                    finalVisibleItems[id] = remoteItem;
+                  }
+                  break;
               }
             }
           }
-
-          effectiveRows = merged.values.toList();
-          await OfflineStorageService.saveAllItems(effectiveRows);
-        } catch (e) {
-          debugPrint('Remote fetch/merge failed, falling back to local: $e');
+        } catch (syncErr) {
+          debugPrint(
+            'Cloud sync skipped (offline or timeout), loading local SQLite cache: $syncErr',
+          );
           _isOnlineSyncActive = false;
-          effectiveRows = localRows;
+          for (final entry in localDecryptedById.entries) {
+            final item = entry.value;
+            if (item != null && !item.isDeleted) {
+              finalVisibleItems[entry.key] = item;
+            }
+          }
         }
       } else {
         _isOnlineSyncActive = false;
-      }
-
-      final List<VaultItem> decryptedList = [];
-
-      for (final row in effectiveRows) {
-        if (row['is_deleted'] == true) continue;
-        try {
-          final decrypted = await _decryptRow(row);
-          if (decrypted != null && !decrypted.isDeleted) {
-            decryptedList.add(decrypted);
+        for (final entry in localDecryptedById.entries) {
+          final item = entry.value;
+          if (item != null && !item.isDeleted) {
+            finalVisibleItems[entry.key] = item;
           }
-        } catch (e) {
-          debugPrint('Failed to decrypt item ${row['id']}: $e');
         }
       }
 
-      _sortItems(decryptedList);
-      _items = decryptedList;
-    } catch (e) {
-      debugPrint('Error loading vault: $e');
+      final loaded = finalVisibleItems.values.toList();
+      _sortItems(loaded);
+      _items = loaded;
+      _conflicts = detectedConflicts;
+      await syncAutofillIndex(_autofillEnabled);
     } finally {
       _isLoading = false;
+      _isSyncingVault = false;
       notifyListeners();
+      if (_reloadRequested) {
+        _reloadRequested = false;
+        Future.microtask(loadVault);
+      }
     }
+  }
+
+  Future<void> resolveConflict(
+    SyncConflict conflict,
+    ConflictResolutionChoice choice,
+  ) async {
+    if (_masterKey == null || _isDuressMode) return;
+
+    if (choice == ConflictResolutionChoice.keepLocal) {
+      final refreshed = conflict.localItem.copyWith(
+        clientUpdatedAt: DateTime.now().toUtc(),
+      );
+      await _persistItemEncrypted(refreshed, isDirtyBeforeSync: true);
+    } else if (choice == ConflictResolutionChoice.keepRemote) {
+      final remote = conflict.remoteItem;
+      final plainJson = remote.toPlainJson();
+      final encrypted = await _cryptoService.encryptData(plainJson, _masterKey!);
+      final storageMap = remote.toStorageMap(
+        encryptedPayload: encrypted.ciphertext,
+        iv: encrypted.iv,
+        mac: encrypted.mac,
+      );
+      final remoteHash = remote.computeContentHash();
+      await OfflineStorageService.upsertLocalItem(
+        storageMap,
+        dirty: false,
+        baseHash: remoteHash,
+      );
+      _replaceOrRemoveInMemory(remote);
+    } else if (choice == ConflictResolutionChoice.keepBothAsCopy) {
+      // Keep remote on original ID cleanly
+      final remote = conflict.remoteItem;
+      final remoteEnc = await _cryptoService.encryptData(
+        remote.toPlainJson(),
+        _masterKey!,
+      );
+      final remoteStorage = remote.toStorageMap(
+        encryptedPayload: remoteEnc.ciphertext,
+        iv: remoteEnc.iv,
+        mac: remoteEnc.mac,
+      );
+      await OfflineStorageService.upsertLocalItem(
+        remoteStorage,
+        dirty: false,
+        baseHash: remote.computeContentHash(),
+      );
+      _replaceOrRemoveInMemory(remote);
+
+      // Save local copy under a brand-new ID
+      final copyItem = conflict.localItem.copyWith(
+        id: _uuid.v4(),
+        title: '${conflict.localItem.title} (Çakışma Kopyası)',
+        clientUpdatedAt: DateTime.now().toUtc(),
+      );
+      await saveItem(copyItem);
+    }
+
+    _conflicts.removeWhere((c) => c.itemId == conflict.itemId);
+    await syncAutofillIndex(_autofillEnabled);
+    notifyListeners();
+  }
+
+  void _replaceOrRemoveInMemory(VaultItem item) {
+    _items.removeWhere((i) => i.id == item.id);
+    if (!item.isDeleted) {
+      _items.add(item);
+      _sortItems(_items);
+    }
+  }
+
+  // --- Duress / Decoy Storage ---
+
+  Future<void> _loadDuressVault() async {
+    if (_masterKey == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(AppConstants.keyDuressEncryptedItems);
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw) as Map<String, dynamic>;
+        final plainStr = await _cryptoService.decryptData(
+          ciphertextBase64: decoded['ciphertext'] as String,
+          ivBase64: decoded['iv'] as String,
+          macBase64: decoded['mac'] as String,
+          masterKey: _masterKey!,
+        );
+        final list = jsonDecode(plainStr) as List<dynamic>;
+        _items = list
+            .map(
+              (entry) {
+                final map = entry as Map<String, dynamic>;
+                final rawType = map['item_type'] as String? ?? 'note';
+                return VaultItem.fromDecryptedJson(
+                  id: map['id'] as String? ?? _uuid.v4(),
+                  type: VaultItem.typeFromString(rawType),
+                  decryptedPayload: map,
+                  isDeleted: false,
+                  clientUpdatedAt:
+                      DateTime.tryParse(map['clientUpdatedAt'] as String? ?? '') ??
+                      DateTime.now().toUtc(),
+                );
+              },
+            )
+            .toList();
+        _sortItems(_items);
+        return;
+      } catch (e) {
+        debugPrint('Duress vault decode warning: $e');
+      }
+    }
+
+    // Seed innocent default decoy items on first duress unlock
+    _items = [
+      VaultItem(
+        id: _uuid.v4(),
+        type: VaultItemType.note,
+        title: 'Haftalık Alışveriş Listesi',
+        content: '- [ ] Süt, yumurta, tam buğday ekmek\n- [ ] Kahve çekirdeği\n- [ ] Meyve ve sebze\n- [ ] Bulaşık tableti',
+        tags: const ['günlük'],
+        isPinned: true,
+      ),
+      VaultItem(
+        id: _uuid.v4(),
+        type: VaultItemType.note,
+        title: 'Okunacak Kitaplar',
+        content: '- Atomik Alışkanlıklar\n- Derin Çalışma\n- Temiz Kod',
+        tags: const ['kişisel'],
+      ),
+      VaultItem(
+        id: _uuid.v4(),
+        type: VaultItemType.wifi,
+        title: 'Misafir Wi-Fi',
+        wifiSsid: 'GuestNetwork_2.4G',
+        wifiPassword: 'WelcomeGuest2026',
+        wifiSecurity: 'WPA',
+      ),
+    ];
+    await _saveDuressVault();
+  }
+
+  Future<void> _saveDuressVault() async {
+    if (_masterKey == null) return;
+    final List<Map<String, dynamic>> serialized = [];
+    for (final item in _items.where((i) => !i.isDeleted)) {
+      final map = jsonDecode(item.toPlainJson()) as Map<String, dynamic>;
+      map['id'] = item.id;
+      map['item_type'] = item.type.storageKey;
+      map['clientUpdatedAt'] = item.clientUpdatedAt.toIso8601String();
+      serialized.add(map);
+    }
+    final encrypted = await _cryptoService.encryptData(
+      jsonEncode(serialized),
+      _masterKey!,
+    );
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      AppConstants.keyDuressEncryptedItems,
+      jsonEncode(encrypted),
+    );
   }
 
   void _sortItems(List<VaultItem> list) {
@@ -222,97 +759,129 @@ class VaultProvider with ChangeNotifier {
     });
   }
 
-  /// Subscribe to Supabase Realtime changes
   void _subscribeToRealtime() {
     _subscription?.unsubscribe();
-    _subscription = null;
-    if (!SupabaseService.isInitialized || SupabaseService.currentUser == null) return;
+    if (!SupabaseService.isInitialized ||
+        SupabaseService.currentUser == null ||
+        _isDuressMode) {
+      return;
+    }
 
     _subscription = _supabaseService.subscribeToVaultChanges((payload) async {
-      if (!_isActive || _masterKey == null) return;
-      try {
-        final record = payload.newRecord;
-        if (record.isEmpty) return;
+      if (!_isActive || _masterKey == null || _isDuressMode) return;
+      final record = payload.newRecord;
+      if (record.isEmpty || record['id'] == null) return;
 
-        final isDeleted = record['is_deleted'] == true;
-        final id = record['id'] as String?;
-        if (id == null) return;
+      final id = record['id'] as String;
+      final isDeleted = record['is_deleted'] == true;
 
-        if (isDeleted) {
-          _items.removeWhere((item) => item.id == id);
-          await OfflineStorageService.upsertLocalItem(record);
+      final localRows = await OfflineStorageService.loadLocalItems();
+      final localRow = localRows.cast<Map<String, dynamic>?>().firstWhere(
+            (r) => r?['id'] == id,
+            orElse: () => null,
+          );
+      final localDirty = localRow != null && localRow['dirty'] == true;
+
+      if (isDeleted) {
+        if (!localDirty) {
+          await OfflineStorageService.removeLocalItem(id);
+          _items.removeWhere((i) => i.id == id);
+          _conflicts.removeWhere((c) => c.itemId == id);
+          await syncAutofillIndex(_autofillEnabled);
           notifyListeners();
-          return;
         }
-
-        final decrypted = await _decryptRow(record);
-        if (decrypted != null) {
-          final index = _items.indexWhere((item) => item.id == id);
-          if (index != -1) {
-            _items[index] = decrypted;
+      } else {
+        final decryptedItem = await _decryptRow(record);
+        if (decryptedItem != null) {
+          final remoteHash = decryptedItem.computeContentHash();
+          if (localDirty) {
+            final localItem = await _decryptRow(localRow);
+            final baseHash = localRow['base_hash'] as String?;
+            final localHash = localItem?.computeContentHash();
+            if (localItem != null &&
+                localHash != remoteHash &&
+                baseHash != null &&
+                baseHash != remoteHash) {
+              _conflicts.removeWhere((c) => c.itemId == id);
+              _conflicts.add(
+                SyncConflict(
+                  itemId: id,
+                  localItem: localItem,
+                  remoteItem: decryptedItem,
+                ),
+              );
+              notifyListeners();
+            }
           } else {
-            _items.insert(0, decrypted);
+            await OfflineStorageService.upsertLocalItem(
+              record,
+              dirty: false,
+              baseHash: remoteHash,
+            );
+            _replaceOrRemoveInMemory(decryptedItem);
+            await syncAutofillIndex(_autofillEnabled);
+            notifyListeners();
           }
-          _sortItems(_items);
-          await OfflineStorageService.upsertLocalItem(record);
-          notifyListeners();
         }
-      } catch (e) {
-        debugPrint('Realtime payload handle error: $e');
       }
     });
   }
 
-  /// Decrypt a single database record
   Future<VaultItem?> _decryptRow(Map<String, dynamic> row) async {
     if (_masterKey == null) return null;
     final ciphertext = row['encrypted_payload'] as String?;
     final iv = row['iv'] as String?;
     final mac = row['mac'] as String?;
     final id = row['id'] as String?;
-    final itemTypeStr = row['item_type'] as String? ?? 'note';
-    final isDeleted = row['is_deleted'] == true;
+    final userId = row['user_id'] as String?;
+    final isDeleted = row['is_deleted'] == true || row['is_deleted'] == 1;
     final clientUpdatedAtStr = row['client_updated_at'] as String?;
-    final updatedAtStr = row['updated_at'] as String?;
 
-    if (id == null || ciphertext == null || iv == null || mac == null) return null;
+    if (ciphertext == null || iv == null || mac == null || id == null) {
+      return null;
+    }
 
-    final plainJsonStr = await _cryptoService.decryptData(
-      ciphertextBase64: ciphertext,
-      ivBase64: iv,
-      macBase64: mac,
-      masterKey: _masterKey!,
-    );
-
-    final Map<String, dynamic> payload = jsonDecode(plainJsonStr);
-    return VaultItem.fromDecryptedJson(
-      id: id,
-      type: VaultItem.typeFromString(itemTypeStr),
-      decryptedPayload: payload,
-      isDeleted: isDeleted,
-      clientUpdatedAt: clientUpdatedAtStr != null ? DateTime.parse(clientUpdatedAtStr) : DateTime.now(),
-      updatedAt: updatedAtStr != null ? DateTime.parse(updatedAtStr) : null,
-      rawCiphertext: ciphertext,
-      rawIv: iv,
-      rawMac: mac,
-    );
+    try {
+      final plainJsonStr = await _cryptoService.decryptData(
+        ciphertextBase64: ciphertext,
+        ivBase64: iv,
+        macBase64: mac,
+        masterKey: _masterKey!,
+      );
+      final Map<String, dynamic> payload = jsonDecode(plainJsonStr);
+      final rawType =
+          row['item_type'] as String? ??
+          (payload['item_type'] as String? ?? 'note');
+      return VaultItem.fromDecryptedJson(
+        id: id,
+        userId: userId,
+        type: VaultItem.typeFromString(rawType),
+        decryptedPayload: payload,
+        isDeleted: isDeleted,
+        clientUpdatedAt:
+            DateTime.tryParse(clientUpdatedAtStr ?? '') ?? DateTime.now().toUtc(),
+      );
+    } catch (e) {
+      debugPrint('Failed to decrypt item $id: $e');
+      return null;
+    }
   }
 
-  /// Save or update an item (encrypts before saving)
-  Future<void> saveItem(VaultItem item) async {
+  Future<void> _persistItemEncrypted(
+    VaultItem itemToSave, {
+    bool isDirtyBeforeSync = true,
+  }) async {
     if (_masterKey == null) return;
-    final plainJson = item.toPlainJson();
+    final plainJson = itemToSave.toPlainJson();
     final encrypted = await _cryptoService.encryptData(plainJson, _masterKey!);
+    final contentHash = itemToSave.computeContentHash();
 
-    final itemWithCipher = item.copyWith(
-      rawCiphertext: encrypted.ciphertext,
-      rawIv: encrypted.iv,
-      rawMac: encrypted.mac,
-      clientUpdatedAt: DateTime.now().toUtc(),
+    final itemWithCipher = itemToSave.copyWith(
+      userId: SupabaseService.currentUser?.id,
     );
 
-    final index = _items.indexWhere((i) => i.id == item.id);
-    if (index != -1) {
+    final index = _items.indexWhere((i) => i.id == itemWithCipher.id);
+    if (index >= 0) {
       _items[index] = itemWithCipher;
     } else {
       _items.insert(0, itemWithCipher);
@@ -326,56 +895,286 @@ class VaultProvider with ChangeNotifier {
       mac: encrypted.mac,
     );
 
-    await OfflineStorageService.upsertLocalItem(storageMap);
+    await OfflineStorageService.upsertLocalItem(
+      storageMap,
+      dirty: isDirtyBeforeSync,
+      preserveExistingBaseHash: true,
+    );
 
     if (SupabaseService.isInitialized && SupabaseService.currentUser != null) {
       try {
         await _supabaseService.upsertVaultItem(storageMap);
+        await OfflineStorageService.markItemSynced(itemWithCipher.id, contentHash);
       } catch (e) {
-        debugPrint('Remote upsert failed (will sync later): $e');
+        debugPrint('Cloud save deferred (kept dirty in SQLite): $e');
       }
     }
   }
 
-  /// Re-encrypts all items with a new master key during master password rotation
-  Future<void> reEncryptAllWithNewKey(List<int> newMasterKey) async {
-    final List<Map<String, dynamic>> updatedStorageList = [];
+  Future<void> saveItem(VaultItem item) async {
+    if (_masterKey == null) return;
 
-    for (int i = 0; i < _items.length; i++) {
-      final item = _items[i];
+    final existingIdx = _items.indexWhere((i) => i.id == item.id);
+    final existing = existingIdx >= 0 ? _items[existingIdx] : null;
+
+    var itemToSave = item.copyWith(
+      clientUpdatedAt: DateTime.now().toUtc(),
+      userId: SupabaseService.currentUser?.id,
+    );
+    itemToSave = withRevisionSnapshot(existing, itemToSave);
+
+    if (_isDuressMode) {
+      final index = _items.indexWhere((i) => i.id == itemToSave.id);
+      if (index >= 0) {
+        _items[index] = itemToSave;
+      } else {
+        _items.insert(0, itemToSave);
+      }
+      _sortItems(_items);
+      await _saveDuressVault();
+      notifyListeners();
+      return;
+    }
+
+    await _persistItemEncrypted(itemToSave);
+    await syncAutofillIndex(_autofillEnabled);
+  }
+
+  /// Folders CRUD (stored as VaultItemType.folder)
+  Future<VaultFolder> createFolder({
+    required String name,
+    String? parentId,
+    String colorHex = '#6366F1',
+  }) async {
+    final folder = VaultFolder(
+      id: _uuid.v4(),
+      name: name.trim(),
+      parentId: parentId,
+      colorHex: colorHex,
+      updatedAt: DateTime.now().toUtc(),
+    );
+    await saveItem(folder.toVaultItem(userId: SupabaseService.currentUser?.id));
+    return folder;
+  }
+
+  Future<void> renameFolder(String folderId, String newName) async {
+    final existing = folders.cast<VaultFolder?>().firstWhere(
+          (f) => f?.id == folderId,
+          orElse: () => null,
+        );
+    if (existing == null) return;
+    final updated = existing.copyWith(
+      name: newName.trim(),
+      updatedAt: DateTime.now().toUtc(),
+    );
+    await saveItem(updated.toVaultItem(userId: SupabaseService.currentUser?.id));
+  }
+
+  Future<void> deleteFolder(String folderId) async {
+    final targetFolder = folders.cast<VaultFolder?>().firstWhere(
+          (f) => f?.id == folderId,
+          orElse: () => null,
+        );
+    final parentId = targetFolder?.parentId;
+
+    // Reparent child folders so hierarchy stays intact
+    for (final child in folders.where((f) => f.parentId == folderId).toList()) {
+      final reparented = child.copyWith(
+        parentId: parentId,
+        clearParentId: parentId == null,
+        updatedAt: DateTime.now().toUtc(),
+      );
+      await saveItem(
+        reparented.toVaultItem(userId: SupabaseService.currentUser?.id),
+      );
+    }
+
+    // Move items in the deleted folder up to parentId (or root)
+    for (final item
+        in _items
+            .where((i) => i.folderId == folderId && i.type != VaultItemType.folder)
+            .toList()) {
+      await saveItem(
+        item.copyWith(
+          folderId: parentId,
+          clearFolderId: parentId == null,
+        ),
+      );
+    }
+
+    if (_selectedFolderId == folderId) {
+      _selectedFolderId = parentId;
+    }
+
+    await deleteItem(folderId);
+  }
+
+  /// Encrypted Attachments CRUD
+  Future<VaultAttachmentMeta> encryptAndStoreAttachment({
+    required String itemId,
+    required String fileName,
+    required String mimeType,
+    required Uint8List bytes,
+  }) async {
+    if (_masterKey == null) {
+      throw Exception('Kasa kilidi açık değil.');
+    }
+    final attachmentId = _uuid.v4();
+    final encrypted = await _cryptoService.encryptBytes(bytes, _masterKey!);
+    final digest = CryptoService.sha256HexBytes(bytes);
+    final now = DateTime.now().toUtc();
+
+    await OfflineStorageService.upsertAttachment({
+      'id': attachmentId,
+      'item_id': itemId,
+      'file_name': fileName,
+      'mime_type': mimeType,
+      'size_bytes': bytes.length,
+      'sha256': digest,
+      'ciphertext': encrypted.ciphertext,
+      'iv': encrypted.iv,
+      'mac': encrypted.mac,
+      'created_at': now.toIso8601String(),
+    });
+
+    return VaultAttachmentMeta(
+      id: attachmentId,
+      fileName: fileName,
+      mimeType: mimeType,
+      sizeBytes: bytes.length,
+      sha256: digest,
+      createdAt: now,
+    );
+  }
+
+  Future<Uint8List?> loadDecryptedAttachment(String attachmentId) async {
+    if (_masterKey == null) return null;
+    final row = await OfflineStorageService.loadAttachmentById(attachmentId);
+    if (row == null) return null;
+    try {
+      return await _cryptoService.decryptBytes(
+        ciphertextBase64: row['ciphertext'] as String,
+        ivBase64: row['iv'] as String,
+        macBase64: row['mac'] as String,
+        masterKey: _masterKey!,
+      );
+    } catch (e) {
+      debugPrint('Failed to decrypt attachment $attachmentId: $e');
+      return null;
+    }
+  }
+
+  Future<void> deleteEncryptedAttachment(String attachmentId) async {
+    await OfflineStorageService.deleteAttachment(attachmentId);
+  }
+
+  /// Re-encrypts ALL vault items + encrypted attachments when master password / KDF changes.
+  Future<void> reEncryptAllWithNewKey(List<int> newMasterKey) async {
+    if (_isDuressMode) {
+      throw Exception('Mevcut modda şifre değiştirilemez.');
+    }
+    final oldKey = _masterKey;
+    final List<Map<String, dynamic>> updatedStorageRows = [];
+
+    for (final item in _items) {
       final plainJson = item.toPlainJson();
       final encrypted = await _cryptoService.encryptData(plainJson, newMasterKey);
-
       final updatedItem = item.copyWith(
-        rawCiphertext: encrypted.ciphertext,
-        rawIv: encrypted.iv,
-        rawMac: encrypted.mac,
         clientUpdatedAt: DateTime.now().toUtc(),
       );
-
-      _items[i] = updatedItem;
-
       final storageMap = updatedItem.toStorageMap(
         encryptedPayload: encrypted.ciphertext,
         iv: encrypted.iv,
         mac: encrypted.mac,
       );
-      updatedStorageList.add(storageMap);
+      storageMap['dirty'] = true;
+      storageMap['base_hash'] = updatedItem.computeContentHash();
+      updatedStorageRows.add(storageMap);
 
       if (SupabaseService.isInitialized && SupabaseService.currentUser != null) {
         try {
           await _supabaseService.upsertVaultItem(storageMap);
+          storageMap['dirty'] = false;
         } catch (e) {
-          debugPrint('Remote re-encrypt upsert error for item ${item.id}: $e');
+          debugPrint('Re-encrypt cloud push warning for ${item.id}: $e');
         }
       }
     }
 
-    await OfflineStorageService.saveAllItems(updatedStorageList);
+    // Also re-encrypt local AES-GCM file attachments so they remain decryptable!
+    if (oldKey != null) {
+      for (final item in _items) {
+        final attRows = await OfflineStorageService.loadAttachmentsForItem(item.id);
+        for (final row in attRows) {
+          try {
+            final plainBytes = await _cryptoService.decryptBytes(
+              ciphertextBase64: row['ciphertext'] as String,
+              ivBase64: row['iv'] as String,
+              macBase64: row['mac'] as String,
+              masterKey: oldKey,
+            );
+            final reEnc = await _cryptoService.encryptBytes(
+              plainBytes,
+              newMasterKey,
+            );
+            await OfflineStorageService.upsertAttachment({
+              ...row,
+              'ciphertext': reEnc.ciphertext,
+              'iv': reEnc.iv,
+              'mac': reEnc.mac,
+            });
+          } catch (e) {
+            debugPrint('Attachment re-encrypt skipped (${row['id']}): $e');
+          }
+        }
+      }
+    }
 
+    await OfflineStorageService.saveAllItems(updatedStorageRows);
     CryptoService.wipe(_masterKey);
     _masterKey = List<int>.from(newMasterKey);
     notifyListeners();
+  }
+
+  /// Imports items and folders in bulk (e.g., from CSV/JSON password managers or backup).
+  Future<int> importBulk({
+    required List<VaultItem> itemsToImport,
+    List<VaultFolder> foldersToImport = const [],
+  }) async {
+    int count = 0;
+    for (final folder in foldersToImport) {
+      await saveItem(
+        folder.toVaultItem(userId: SupabaseService.currentUser?.id),
+      );
+    }
+    for (final item in itemsToImport) {
+      await saveItem(item);
+      count++;
+    }
+    return count;
+  }
+
+  /// Updates the hardware-keystore-encrypted Android Autofill credential cache.
+  Future<void> syncAutofillIndex(bool enabled) async {
+    if (kIsWeb || !Platform.isAndroid) return;
+    if (!enabled || !_isActive || _isDuressMode || _masterKey == null) {
+      await NativeBridgeService.clearAutofillIndex();
+      return;
+    }
+    final entries = items
+        .where((i) => i.type == VaultItemType.credential)
+        .map(
+          (i) => {
+            'id': i.id,
+            'title': i.title,
+            'website': i.website,
+            'username': i.username,
+            'password': i.password,
+            'totpSecret': i.totpSecret,
+          },
+        )
+        .toList();
+    await NativeBridgeService.updateAutofillIndex(entries);
   }
 
   Future<void> toggleFavorite(VaultItem item) async {
@@ -387,52 +1186,114 @@ class VaultProvider with ChangeNotifier {
   }
 
   Future<void> moveToTrash(VaultItem item) async {
-    await saveItem(item.copyWith(isTrash: true));
+    await saveItem(item.copyWith(isTrash: true, isPinned: false));
   }
 
   Future<void> restoreFromTrash(VaultItem item) async {
     await saveItem(item.copyWith(isTrash: false));
   }
 
-  /// Permanently delete an item (writes tombstone locally if offline so remote deletion syncs later)
   Future<void> deleteItem(String id) async {
-    _items.removeWhere((item) => item.id == id);
+    _items.removeWhere((i) => i.id == id);
+    _conflicts.removeWhere((c) => c.itemId == id);
     notifyListeners();
+
+    if (_isDuressMode) {
+      await _saveDuressVault();
+      return;
+    }
+
+    await OfflineStorageService.deleteAttachmentsForItem(id);
 
     final tombstone = {
       'id': id,
+      'item_type': 'deleted',
+      'encrypted_payload': '',
+      'iv': '',
+      'mac': '',
       'is_deleted': true,
       'client_updated_at': DateTime.now().toUtc().toIso8601String(),
     };
-    await OfflineStorageService.upsertLocalItem(tombstone);
+    await OfflineStorageService.upsertLocalItem(
+      tombstone,
+      dirty: true,
+      preserveExistingBaseHash: true,
+    );
 
     if (SupabaseService.isInitialized && SupabaseService.currentUser != null) {
       try {
         await _supabaseService.deleteVaultItem(id);
+        await OfflineStorageService.removeLocalItem(id);
       } catch (e) {
-        debugPrint('Remote delete failed (tombstone saved for later sync): $e');
+        debugPrint('Cloud delete deferred cleanly: $e');
       }
     }
+    await syncAutofillIndex(_autofillEnabled);
   }
 
-  /// Empty all items from Trash permanently
   Future<void> emptyTrash() async {
-    final trashItems = _items.where((i) => i.isTrash).toList();
-    for (final item in trashItems) {
+    final trashList = _items.where((i) => i.isTrash).toList();
+    for (final item in trashList) {
       await deleteItem(item.id);
     }
   }
 
-  VaultItem createNewNote() => VaultItem(id: const Uuid().v4(), type: VaultItemType.note, title: '', content: '');
-  VaultItem createNewCredential() => VaultItem(id: const Uuid().v4(), type: VaultItemType.credential, title: '');
-  VaultItem createNewCard() => VaultItem(id: const Uuid().v4(), type: VaultItemType.card, title: '');
-  VaultItem createNewSecret() => VaultItem(id: const Uuid().v4(), type: VaultItemType.secret, title: '');
+  // Factories for UI
+  VaultItem createNewNote({String? folderId}) => VaultItem(
+        id: _uuid.v4(),
+        type: VaultItemType.note,
+        title: '',
+        content: '',
+        folderId: folderId,
+      );
+
+  VaultItem createNewCredential({String? folderId}) => VaultItem(
+        id: _uuid.v4(),
+        type: VaultItemType.credential,
+        title: '',
+        folderId: folderId,
+      );
+
+  VaultItem createNewCard({String? folderId}) => VaultItem(
+        id: _uuid.v4(),
+        type: VaultItemType.card,
+        title: '',
+        folderId: folderId,
+      );
+
+  VaultItem createNewSecret({String? folderId}) => VaultItem(
+        id: _uuid.v4(),
+        type: VaultItemType.secret,
+        title: '',
+        folderId: folderId,
+      );
+
+  VaultItem createNewWifi({String? folderId}) => VaultItem(
+        id: _uuid.v4(),
+        type: VaultItemType.wifi,
+        title: '',
+        wifiSecurity: 'WPA',
+        folderId: folderId,
+      );
+
+  VaultItem createNewIdentity({String? folderId}) => VaultItem(
+        id: _uuid.v4(),
+        type: VaultItemType.identity,
+        title: '',
+        folderId: folderId,
+      );
+
+  VaultItem createNewLicense({String? folderId}) => VaultItem(
+        id: _uuid.v4(),
+        type: VaultItemType.license,
+        title: '',
+        folderId: folderId,
+      );
 
   @override
   void dispose() {
-    _subscription?.unsubscribe();
     CryptoService.wipe(_masterKey);
-    _items.clear();
+    _subscription?.unsubscribe();
     super.dispose();
   }
 }

@@ -5,9 +5,11 @@
 *.swp
 .DS_Store
 .atom/
+.build/
 .buildlog/
 .history
 .svn/
+.swiftpm/
 migrate_working_dir/
 
 # IntelliJ related
@@ -41,6 +43,8 @@ app.*.symbols
 
 # Android Studio will create this file on sync of Gradle projects.
 .gradle/
+/android/.gradle/
+/android/local.properties
 /android/app/debug
 /android/app/profile
 /android/app/release
@@ -48,6 +52,7 @@ app.*.symbols
 # macOS specific
 **/macos/Flutter/ephemeral/
 **/macos/Pods/
+**/xcuserdata/
 
 # Windows specific
 **/windows/flutter/ephemeral/

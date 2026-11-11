@@ -1,16 +1,31 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+import '../l10n/app_localizations.dart';
 import '../models/vault_item.dart';
 import '../providers/auth_provider.dart';
+import '../providers/settings_provider.dart';
 import '../providers/vault_provider.dart';
+import '../services/audit_service.dart';
 import '../services/clipboard_service.dart';
+import '../services/hibp_service.dart';
+import '../services/totp_service.dart';
+import '../widgets/custom_fields_editor.dart';
+import '../widgets/folder_selector.dart';
 import '../widgets/password_generator_dialog.dart';
+import '../widgets/qr_scanner_dialog.dart';
+import '../widgets/revision_history_sheet.dart';
 
 class CredentialEditorScreen extends StatefulWidget {
   final VaultItem? initialItem;
+  final String? initialFolderId;
 
-  const CredentialEditorScreen({super.key, this.initialItem});
+  const CredentialEditorScreen({
+    super.key,
+    this.initialItem,
+    this.initialFolderId,
+  });
 
   @override
   State<CredentialEditorScreen> createState() => _CredentialEditorScreenState();
@@ -27,27 +42,35 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
   late TextEditingController _customDaysController;
 
   late List<String> _tags;
+  late List<CustomField> _customFields;
+  late List<VaultItemRevision> _revisions;
+  String? _folderId;
   late bool _isFavorite;
   late bool _isPinned;
+  bool _obscurePassword = true;
+  bool _isSaving = false;
 
-  // Reminder state
   int _reminderMode = 0; // 0: Global, 1: Custom Days, 2: Specific Date, 3: Disabled
   DateTime? _selectedReminderDate;
   DateTime? _passwordLastModified;
-  late String _initialPassword;
+
+  bool _isCheckingBreach = false;
+  int? _breachCount;
+  String? _breachError;
+
   late String _originalTitle;
   late String _originalUsername;
-
-  bool _obscurePassword = true;
-  bool _isSaving = false;
+  late String _initialPassword;
+  late String? _originalFolderId;
+  Timer? _totpTimer;
 
   @override
   void initState() {
     super.initState();
     final item = widget.initialItem;
-    _initialPassword = item?.password ?? '';
     _originalTitle = item?.title ?? '';
     _originalUsername = item?.username ?? '';
+    _initialPassword = item?.password ?? '';
 
     _titleController = TextEditingController(text: _originalTitle);
     _usernameController = TextEditingController(text: _originalUsername);
@@ -57,30 +80,43 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
     _notesController = TextEditingController(text: item?.content ?? '');
     _tagInputController = TextEditingController();
 
-    _tags = List<String>.from(item?.tags ?? []);
+    _tags = List<String>.from(item?.tags ?? const []);
+    _customFields = List<CustomField>.from(item?.customFields ?? const []);
+    _revisions = List<VaultItemRevision>.from(item?.revisions ?? const []);
+    _folderId = item?.folderId ?? widget.initialFolderId;
+    _originalFolderId = _folderId;
+
     _isFavorite = item?.isFavorite ?? false;
     _isPinned = item?.isPinned ?? false;
-
     _passwordLastModified = item?.passwordLastModified;
     _selectedReminderDate = item?.customReminderDate;
 
     if (item?.customExpiryDays == -1) {
-      _reminderMode = 3; // Disabled
+      _reminderMode = 3;
       _customDaysController = TextEditingController();
     } else if (item?.customReminderDate != null) {
-      _reminderMode = 2; // Specific Date
+      _reminderMode = 2;
       _customDaysController = TextEditingController();
     } else if (item?.customExpiryDays != null && item!.customExpiryDays! > 0) {
-      _reminderMode = 1; // Custom Days
-      _customDaysController = TextEditingController(text: item.customExpiryDays.toString());
+      _reminderMode = 1;
+      _customDaysController = TextEditingController(
+        text: item.customExpiryDays.toString(),
+      );
     } else {
-      _reminderMode = 0; // Global default
+      _reminderMode = 0;
       _customDaysController = TextEditingController();
     }
+
+    _totpTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && _totpController.text.trim().isNotEmpty) {
+        setState(() {});
+      }
+    });
   }
 
   @override
   void dispose() {
+    _totpTimer?.cancel();
     _titleController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
@@ -92,10 +128,19 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
     super.dispose();
   }
 
-  bool get _hasUnsavedChanges {
-    return _titleController.text != _originalTitle ||
-        _usernameController.text != _originalUsername ||
-        _passwordController.text != _initialPassword;
+  bool get _hasUnsavedChanges =>
+      _titleController.text != _originalTitle ||
+      _usernameController.text != _originalUsername ||
+      _passwordController.text != _initialPassword ||
+      _folderId != _originalFolderId;
+
+  Future<void> _copyField(String value, String label) async {
+    final timeout = context.read<SettingsProvider>().clipboardTimeoutSeconds;
+    await ClipboardService.copySecurely(value, timeoutSeconds: timeout);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(context.l10n.copiedWithTimeout(label, timeout))),
+    );
   }
 
   Future<void> _openPasswordGenerator() async {
@@ -103,12 +148,48 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
       context: context,
       builder: (ctx) => const PasswordGeneratorDialog(),
     );
-
     if (generated != null && generated.isNotEmpty) {
       setState(() {
         _passwordController.text = generated;
-        _obscurePassword = false;
+        _breachCount = null;
       });
+    }
+  }
+
+  Future<void> _scanTotpQr() async {
+    final raw = await QrScannerDialog.scan(
+      context,
+      title: '2FA QR Kod Tara',
+      subtitle: 'Authenticator kurulum QR kodunu (otpauth://) tarayın veya ekran görüntüsü seçin.',
+    );
+    if (raw == null || raw.trim().isEmpty || !mounted) return;
+
+    final parsed = TotpService.parseOtpAuthUri(raw);
+    if (parsed != null) {
+      setState(() {
+        _totpController.text = parsed.secret;
+        if (_titleController.text.trim().isEmpty && parsed.issuer.isNotEmpty) {
+          _titleController.text = parsed.issuer;
+        }
+        if (_usernameController.text.trim().isEmpty &&
+            parsed.accountName.isNotEmpty) {
+          _usernameController.text = parsed.accountName;
+        }
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('2FA (TOTP) anahtarı QR koddan aktarıldı.')),
+      );
+    } else if (TotpService.generateCode(raw) != null) {
+      setState(() => _totpController.text = raw.trim());
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Base32 2FA anahtarı aktarıldı.')),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('QR kod geçerli bir otpauth:// veya Base32 TOTP anahtarı içermiyor.'),
+        ),
+      );
     }
   }
 
@@ -120,73 +201,116 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
       firstDate: now,
       lastDate: now.add(const Duration(days: 365 * 5)),
     );
-
     if (picked != null) {
-      setState(() {
-        _selectedReminderDate = picked;
-        _reminderMode = 2;
-      });
+      setState(() => _selectedReminderDate = picked);
     }
   }
 
-  Future<void> _save() async {
+  Future<void> _checkPasswordBreach() async {
+    final pass = _passwordController.text;
+    if (pass.isEmpty) return;
+
+    setState(() {
+      _isCheckingBreach = true;
+      _breachCount = null;
+      _breachError = null;
+    });
+
+    try {
+      final result = await HibpService.checkPasswordBreach(pass);
+      if (mounted) {
+        setState(() {
+          _isCheckingBreach = false;
+          if (result.errorMessage != null) {
+            _breachError = result.errorMessage;
+          } else {
+            _breachCount = result.breachCount;
+          }
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isCheckingBreach = false;
+          _breachError = 'Sızıntı veritabanına ulaşılamadı (İnternet gerekli).';
+        });
+      }
+    }
+  }
+
+  Future<void> _saveCredential() async {
     final title = _titleController.text.trim();
-    if (title.isEmpty && _usernameController.text.isEmpty && _passwordController.text.isEmpty) {
-      Navigator.of(context).pop();
+    if (title.isEmpty &&
+        _usernameController.text.isEmpty &&
+        _passwordController.text.isEmpty) {
+      Navigator.pop(context);
       return;
     }
 
     setState(() => _isSaving = true);
     final vault = context.read<VaultProvider>();
 
-    // Check if password changed to update passwordLastModified and history
-    final newPass = _passwordController.text;
-    final List<String> history = List.from(widget.initialItem?.passwordHistory ?? []);
-    DateTime? lastMod = _passwordLastModified;
+    final newPassword = _passwordController.text;
+    final List<String> updatedHistory = List<String>.from(
+      widget.initialItem?.passwordHistory ?? const [],
+    );
 
-    if (newPass != _initialPassword) {
-      lastMod = DateTime.now().toUtc();
-      if (_initialPassword.isNotEmpty && !history.contains(_initialPassword)) {
-        history.insert(0, _initialPassword);
+    if (widget.initialItem != null &&
+        _initialPassword.isNotEmpty &&
+        newPassword != _initialPassword) {
+      if (!updatedHistory.contains(_initialPassword)) {
+        updatedHistory.insert(0, _initialPassword);
+        if (updatedHistory.length > 10) updatedHistory.removeLast();
       }
+      _passwordLastModified = DateTime.now().toUtc();
+    } else if (widget.initialItem == null && newPassword.isNotEmpty) {
+      _passwordLastModified = DateTime.now().toUtc();
     }
 
-    // Determine expiry settings
     int? customDays;
-    DateTime? reminderDate;
-
+    DateTime? customDate;
     if (_reminderMode == 1) {
       customDays = int.tryParse(_customDaysController.text.trim());
     } else if (_reminderMode == 2) {
-      reminderDate = _selectedReminderDate;
+      customDate = _selectedReminderDate;
     } else if (_reminderMode == 3) {
-      customDays = -1; // Disabled
+      customDays = -1;
     }
 
-    final updatedItem = (widget.initialItem ?? vault.createNewCredential()).copyWith(
-      title: title.isEmpty ? 'İsimsiz Hesap' : title,
-      username: _usernameController.text.trim(),
-      password: newPass,
-      website: _websiteController.text.trim(),
-      totpSecret: _totpController.text.trim().replaceAll(' ', ''),
-      content: _notesController.text.trim(),
-      tags: _tags,
-      isFavorite: _isFavorite,
-      isPinned: _isPinned,
-      passwordLastModified: lastMod,
-      customExpiryDays: customDays,
-      customReminderDate: reminderDate,
-      passwordHistory: history,
-      clientUpdatedAt: DateTime.now().toUtc(),
-    );
+    final updatedItem = (widget.initialItem ?? vault.createNewCredential())
+        .copyWith(
+          title: title.isEmpty ? 'Adsız Hesap' : title,
+          username: _usernameController.text.trim(),
+          password: newPassword,
+          website: _websiteController.text.trim(),
+          totpSecret: _totpController.text.trim(),
+          content: _notesController.text.trim(),
+          folderId: _folderId,
+          clearFolderId: _folderId == null,
+          tags: _tags,
+          customFields: _customFields,
+          revisions: _revisions,
+          passwordHistory: updatedHistory,
+          passwordLastModified: _passwordLastModified,
+          customExpiryDays: customDays,
+          clearCustomExpiryDays: customDays == null,
+          customReminderDate: customDate,
+          clearCustomReminderDate: customDate == null,
+          isFavorite: _isFavorite,
+          isPinned: _isPinned,
+        );
 
     await vault.saveItem(updatedItem);
+
     _originalTitle = _titleController.text;
     _originalUsername = _usernameController.text;
-    _initialPassword = newPass;
-    setState(() => _isSaving = false);
+    _initialPassword = _passwordController.text;
+    _originalFolderId = _folderId;
 
-    if (mounted) Navigator.of(context).pop();
+    if (mounted) {
+      setState(() => _isSaving = false);
+      Navigator.pop(context);
+    }
   }
 
   void _addTag(String rawTag) {
@@ -201,374 +325,519 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
 
   void _removeTag(String tag) => setState(() => _tags.remove(tag));
 
-  Future<void> _delete() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Hesabı Çöpe Taşı'),
-        content: const Text('Bu hesabı çöp kutusuna taşımak istediğinize emin misiniz?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Vazgeç')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Çöpe Taşı'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed == true && mounted) {
-      if (widget.initialItem != null) {
-        await context.read<VaultProvider>().moveToTrash(widget.initialItem!);
-      }
-      if (mounted) Navigator.of(context).pop();
-    }
-  }
-
-  Future<bool> _handlePop() async {
+  Future<bool> _confirmDiscard() async {
     if (!_hasUnsavedChanges) return true;
-
-    final shouldDiscard = await showDialog<bool>(
+    final res = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Kaydedilmemiş Değişiklikler'),
-        content: const Text('Hesap bilgilerinde kaydedilmemiş değişiklikler var. Çıkmak istediğinize emin misiniz?'),
+        content: const Text(
+          'Hesap bilgilerindeki değişiklikler kaydedilmedi. Çıkmak istediğinize emin misiniz?',
+        ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
+            onPressed: () => Navigator.pop(ctx, false),
             child: const Text('Düzenlemeye Devam Et'),
           ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Değişiklikleri Sil'),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Kaydetmeden Çık'),
           ),
         ],
       ),
     );
-
-    return shouldDiscard ?? false;
+    return res ?? false;
   }
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
     final auth = context.watch<AuthProvider>();
-    final dateFormat = DateFormat('dd MMMM yyyy');
+    final passHistory = widget.initialItem?.passwordHistory ?? const [];
+    final liveTotp = _totpController.text.trim().isNotEmpty
+        ? TotpService.generateCode(_totpController.text.trim())
+        : null;
+    final websiteCheck = AuditService.checkWebsiteSecurity(
+      _websiteController.text,
+    );
 
     return PopScope(
       canPop: !_hasUnsavedChanges,
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
-        final shouldPop = await _handlePop();
-        if (shouldPop && context.mounted) {
+        final discard = await _confirmDiscard();
+        if (discard && context.mounted) {
           Navigator.of(context).pop();
         }
       },
       child: Scaffold(
         appBar: AppBar(
-          title: Text(widget.initialItem == null ? 'Yeni Şifre / Hesap' : 'Hesap Düzenle'),
+          title: Text(
+            widget.initialItem == null
+                ? l10n.tr('Yeni Hesap / Şifre', 'New Login')
+                : l10n.tr('Hesabı Düzenle', 'Edit Login'),
+          ),
           actions: [
+            if (widget.initialItem != null)
+              IconButton(
+                icon: const Icon(Icons.history),
+                tooltip: l10n.tr('Sürüm Geçmişi', 'Version History'),
+                onPressed: () {
+                  RevisionHistorySheet.show(
+                    context,
+                    item: widget.initialItem!.copyWith(
+                      title: _titleController.text,
+                      password: _passwordController.text,
+                      content: _notesController.text,
+                      revisions: _revisions,
+                    ),
+                    onRestore: (rev) {
+                      setState(() {
+                        _titleController.text = rev.title;
+                        if (rev.password.isNotEmpty) {
+                          _passwordController.text = rev.password;
+                        }
+                        _notesController.text = rev.content;
+                      });
+                    },
+                  );
+                },
+              ),
             IconButton(
               icon: Icon(_isPinned ? Icons.push_pin : Icons.push_pin_outlined),
-              color: _isPinned ? Colors.blueAccent : null,
-              tooltip: _isPinned ? 'Sabitlemeyi Kaldır' : 'Başa Sabitle',
+              color: _isPinned ? theme.colorScheme.primary : null,
               onPressed: () => setState(() => _isPinned = !_isPinned),
             ),
             IconButton(
-              icon: Icon(_isFavorite ? Icons.star_rounded : Icons.star_outline_rounded),
+              icon: Icon(_isFavorite ? Icons.star : Icons.star_border),
               color: _isFavorite ? Colors.amber : null,
-              tooltip: _isFavorite ? 'Favorilerden Çıkar' : 'Favorilere Ekle',
               onPressed: () => setState(() => _isFavorite = !_isFavorite),
             ),
-            if (widget.initialItem != null)
+            if (_isSaving)
+              const Padding(
+                padding: EdgeInsets.all(14),
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              )
+            else
               IconButton(
-                icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                tooltip: 'Çöpe Taşı',
-                onPressed: _delete,
+                icon: const Icon(Icons.check),
+                tooltip: l10n.save,
+                onPressed: _saveCredential,
               ),
-            FilledButton.icon(
-              style: FilledButton.styleFrom(visualDensity: VisualDensity.compact),
-              icon: _isSaving
-                  ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Icon(Icons.save_outlined, size: 18),
-              label: const Text('Kaydet'),
-              onPressed: _isSaving ? null : _save,
-            ),
-            const SizedBox(width: 12),
           ],
         ),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 680),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Title
-                  TextField(
-                    controller: _titleController,
-                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                    decoration: const InputDecoration(
-                      labelText: 'Hesap / Servis Adı',
-                      hintText: 'Örn: Google, GitHub, Banka',
-                      prefixIcon: Icon(Icons.label_outline),
-                      border: OutlineInputBorder(),
+        body: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 720),
+            child: ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                TextField(
+                  controller: _titleController,
+                  decoration: InputDecoration(
+                    labelText: l10n.tr(
+                      'Hesap / Platform Adı (örn. Google, Steam)',
+                      'Account / Platform Name',
+                    ),
+                    prefixIcon: const Icon(Icons.label_outline),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                FolderSelector(
+                  selectedFolderId: _folderId,
+                  onChanged: (v) => setState(() => _folderId = v),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _usernameController,
+                  decoration: InputDecoration(
+                    labelText: l10n.tr('Kullanıcı Adı / E-posta', 'Username / Email'),
+                    prefixIcon: const Icon(Icons.person_outline),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.copy),
+                      onPressed: () {
+                        if (_usernameController.text.isNotEmpty) {
+                          _copyField(_usernameController.text, 'Kullanıcı adı');
+                        }
+                      },
                     ),
                   ),
-                  const SizedBox(height: 16),
-
-                  // Website / URL
-                  TextField(
-                    controller: _websiteController,
-                    decoration: const InputDecoration(
-                      labelText: 'Web Sitesi / URL (İsteğe bağlı)',
-                      hintText: 'https://example.com',
-                      prefixIcon: Icon(Icons.link),
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Username / Email
-                  TextField(
-                    controller: _usernameController,
-                    decoration: InputDecoration(
-                      labelText: 'Kullanıcı Adı / E-posta',
-                      prefixIcon: const Icon(Icons.person_outline),
-                      border: const OutlineInputBorder(),
-                      suffixIcon: IconButton(
-                        icon: const Icon(Icons.copy, size: 18),
-                        tooltip: 'Kullanıcı Adını Kopyala',
-                        onPressed: () async {
-                          if (_usernameController.text.isNotEmpty) {
-                            await ClipboardService.copySecurely(_usernameController.text);
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Kullanıcı adı kopyalandı!')),
-                              );
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _passwordController,
+                  obscureText: _obscurePassword,
+                  onChanged: (_) => setState(() {
+                    _breachCount = null;
+                    _breachError = null;
+                  }),
+                  decoration: InputDecoration(
+                    labelText: l10n.tr('Şifre', 'Password'),
+                    prefixIcon: const Icon(Icons.lock_outline),
+                    suffixIcon: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: Icon(
+                            _obscurePassword
+                                ? Icons.visibility
+                                : Icons.visibility_off,
+                          ),
+                          onPressed: () => setState(
+                            () => _obscurePassword = !_obscurePassword,
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.auto_fix_high),
+                          tooltip: 'Güçlü Şifre Oluştur',
+                          onPressed: _openPasswordGenerator,
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.copy),
+                          onPressed: () {
+                            if (_passwordController.text.isNotEmpty) {
+                              _copyField(_passwordController.text, 'Parola');
                             }
-                          }
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    TextButton.icon(
+                      onPressed:
+                          _isCheckingBreach ? null : _checkPasswordBreach,
+                      icon: _isCheckingBreach
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.security, size: 18),
+                      label: const Text('Sızıntı Kontrolü (HIBP)'),
+                    ),
+                    const Spacer(),
+                    if (_passwordLastModified != null)
+                      Text(
+                        'Son değişim: ${DateFormat('dd.MM.yyyy').format(_passwordLastModified!)}',
+                        style: TextStyle(fontSize: 12, color: theme.hintColor),
+                      ),
+                  ],
+                ),
+                if (_breachCount != null)
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: _breachCount! > 0
+                          ? Colors.redAccent.withValues(alpha: 0.15)
+                          : Colors.greenAccent.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          _breachCount! > 0
+                              ? Icons.warning_amber_rounded
+                              : Icons.verified_user,
+                          color: _breachCount! > 0
+                              ? Colors.redAccent
+                              : Colors.green,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _breachCount! > 0
+                                ? 'UYARI: Bu şifre $_breachCount kez veri sızıntılarında görülmüş! Değiştirmeniz önerilir.'
+                                : 'Harika! Bu şifre bilinen sızıntılarda yer almıyor.',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: _breachCount! > 0
+                                  ? Colors.redAccent
+                                  : Colors.green,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                if (_breachError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      _breachError!,
+                      style: const TextStyle(fontSize: 12, color: Colors.orange),
+                    ),
+                  ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _websiteController,
+                  keyboardType: TextInputType.url,
+                  onChanged: (_) => setState(() {}),
+                  decoration: const InputDecoration(
+                    labelText: 'Web Sitesi (URL)',
+                    prefixIcon: Icon(Icons.language),
+                  ),
+                ),
+                if (websiteCheck.issueType != null &&
+                    websiteCheck.reason != null) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: Colors.orange.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.phishing,
+                          color: Colors.orange,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            websiteCheck.reason!,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Colors.orange,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _totpController,
+                  onChanged: (_) => setState(() {}),
+                  decoration: InputDecoration(
+                    labelText: '2FA (TOTP) Kurulum Anahtarı (İsteğe bağlı)',
+                    hintText: 'Base32 secret veya otpauth://...',
+                    prefixIcon: const Icon(Icons.qr_code),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.qr_code_scanner),
+                      tooltip: 'QR Kod Tara (2FA)',
+                      onPressed: _scanTotpQr,
+                    ),
+                  ),
+                ),
+                if (liveTotp != null) ...[
+                  const SizedBox(height: 8),
+                  Card(
+                    color: theme.colorScheme.primary.withValues(alpha: 0.08),
+                    child: ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.timer_outlined),
+                      title: Text(
+                        '${liveTotp.substring(0, 3)} ${liveTotp.substring(3)}',
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontWeight: FontWeight.bold,
+                          fontSize: 18,
+                          letterSpacing: 2,
+                        ),
+                      ),
+                      subtitle: Text(
+                        'Kalan süre: ${TotpService.getRemainingSeconds()} sn',
+                      ),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.copy, size: 18),
+                        onPressed: () => _copyField(liveTotp, '2FA kodu'),
+                      ),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 20),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surfaceContainerHighest.withValues(
+                      alpha: 0.4,
+                    ),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: theme.colorScheme.outline.withValues(alpha: 0.2),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(
+                            Icons.notifications_active_outlined,
+                            size: 18,
+                            color: Colors.amber,
+                          ),
+                          SizedBox(width: 8),
+                          Text(
+                            'Şifre Yenileme Hatırlatıcısı',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      DropdownButtonFormField<int>(
+                        initialValue: _reminderMode,
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                        ),
+                        items: [
+                          DropdownMenuItem(
+                            value: 0,
+                            child: Text(
+                              'Varsayılan Ayar (${auth.globalPasswordExpiryDays == 0 ? "Kapalı" : "${auth.globalPasswordExpiryDays} Gün"})',
+                            ),
+                          ),
+                          const DropdownMenuItem(
+                            value: 1,
+                            child: Text('Özel Periyot (Gün Olarak)'),
+                          ),
+                          const DropdownMenuItem(
+                            value: 2,
+                            child: Text('Belirli Bir Tarih Seç'),
+                          ),
+                          const DropdownMenuItem(
+                            value: 3,
+                            child: Text('Bu Hesap İçin Hatırlatma Yok'),
+                          ),
+                        ],
+                        onChanged: (val) {
+                          if (val != null) setState(() => _reminderMode = val);
                         },
                       ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Password with generator and copy actions
-                  TextField(
-                    controller: _passwordController,
-                    obscureText: _obscurePassword,
-                    style: TextStyle(
-                      fontFamily: _obscurePassword ? null : 'monospace',
-                      letterSpacing: _obscurePassword ? 2 : 1,
-                    ),
-                    decoration: InputDecoration(
-                      labelText: 'Şifre',
-                      prefixIcon: const Icon(Icons.lock_outline),
-                      border: const OutlineInputBorder(),
-                      suffixIcon: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: Icon(_obscurePassword ? Icons.visibility_outlined : Icons.visibility_off_outlined),
-                            tooltip: _obscurePassword ? 'Şifreyi Göster' : 'Şifreyi Gizle',
-                            onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.auto_fix_high_outlined, color: Colors.blueAccent),
-                            tooltip: 'Gelişmiş Şifre Motoru',
-                            onPressed: _openPasswordGenerator,
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.copy, size: 18),
-                            tooltip: 'Şifreyi Kopyala (30 sn)',
-                            onPressed: () async {
-                              if (_passwordController.text.isNotEmpty) {
-                                await ClipboardService.copySecurely(_passwordController.text);
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(content: Text('Şifre kopyalandı! (30 sn sonra temizlenir)')),
-                                  );
-                                }
-                              }
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // 2FA TOTP Secret Key field
-                  TextField(
-                    controller: _totpController,
-                    decoration: const InputDecoration(
-                      labelText: '2FA / TOTP Gizli Anahtarı veya otpauth:// URI',
-                      hintText: 'JBSWY3DPEHPK3PXP... veya otpauth://...',
-                      prefixIcon: Icon(Icons.phonelink_lock_rounded),
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-
-                  // --------------------------------------------------------
-                  // ŞİFRE YENİLEME VE GÜNCELLEME HATIRLATICISI (Item 30)
-                  // --------------------------------------------------------
-                  Card(
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              const Icon(Icons.alarm_on_rounded, color: Colors.blueAccent, size: 20),
-                              const SizedBox(width: 8),
-                              const Text(
-                                'Şifre Yenileme Hatırlatıcısı (Item 30)',
-                                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-                              ),
-                              const Spacer(),
-                              if (widget.initialItem != null)
-                                Text(
-                                  '${widget.initialItem!.passwordAgeDays} gündür güncel',
-                                  style: const TextStyle(fontSize: 12, color: Colors.grey),
-                                ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          DropdownButtonFormField<int>(
-                            value: _reminderMode,
-                            decoration: const InputDecoration(
-                              border: OutlineInputBorder(),
-                              isDense: true,
-                              labelText: 'Bu Şifre İçin Hatırlatma Kuralı',
-                            ),
-                            items: [
-                              DropdownMenuItem(
-                                value: 0,
-                                child: Text(
-                                  auth.globalPasswordExpiryDays > 0
-                                      ? 'Genel Kasa Kuralını Kullan (${auth.globalPasswordExpiryDays} gün)'
-                                      : 'Genel Kasa Kuralını Kullan (Kapalı)',
-                                ),
-                              ),
-                              const DropdownMenuItem(value: 1, child: Text('Özel Gün Aralığı Belirle')),
-                              const DropdownMenuItem(value: 2, child: Text('Spesifik Bir Hatırlatma Tarihi Seç')),
-                              const DropdownMenuItem(value: 3, child: Text('Bu Şifre İçin Hatırlatmayı Kapat')),
-                            ],
-                            onChanged: (val) {
-                              if (val != null) setState(() => _reminderMode = val);
-                            },
-                          ),
-                          if (_reminderMode == 1) ...[
-                            const SizedBox(height: 12),
-                            TextField(
-                              controller: _customDaysController,
-                              keyboardType: TextInputType.number,
-                              decoration: const InputDecoration(
-                                labelText: 'Kaç günde bir yenileme hatırlatılsın?',
-                                hintText: 'Örn: 45',
-                                prefixIcon: Icon(Icons.timer_outlined),
-                                border: OutlineInputBorder(),
-                              ),
-                            ),
-                          ] else if (_reminderMode == 2) ...[
-                            const SizedBox(height: 12),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    _selectedReminderDate != null
-                                        ? 'Hatırlatma Tarihi: ${dateFormat.format(_selectedReminderDate!)}'
-                                        : 'Henüz bir tarih seçilmedi.',
-                                    style: const TextStyle(fontSize: 13),
-                                  ),
-                                ),
-                                OutlinedButton.icon(
-                                  icon: const Icon(Icons.calendar_month_outlined, size: 16),
-                                  label: const Text('Tarih Seç'),
-                                  onPressed: _pickReminderDate,
-                                ),
-                              ],
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Tags
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      ..._tags.map(
-                        (tag) => Chip(
-                          label: Text('#$tag', style: const TextStyle(fontSize: 12)),
-                          onDeleted: () => _removeTag(tag),
-                          visualDensity: VisualDensity.compact,
-                        ),
-                      ),
-                      SizedBox(
-                        width: 130,
-                        child: TextField(
-                          controller: _tagInputController,
-                          style: const TextStyle(fontSize: 12),
+                      if (_reminderMode == 1) ...[
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: _customDaysController,
+                          keyboardType: TextInputType.number,
                           decoration: const InputDecoration(
-                            hintText: '+ etiket ekle',
-                            border: InputBorder.none,
+                            labelText: 'Kaç günde bir hatırlatılsın? (örn. 30)',
                             isDense: true,
                           ),
-                          onSubmitted: _addTag,
                         ),
-                      ),
+                      ],
+                      if (_reminderMode == 2) ...[
+                        const SizedBox(height: 12),
+                        OutlinedButton.icon(
+                          onPressed: _pickReminderDate,
+                          icon: const Icon(Icons.calendar_today, size: 18),
+                          label: Text(
+                            _selectedReminderDate == null
+                                ? 'Tarih Seçin'
+                                : 'Hatırlatma: ${DateFormat('dd.MM.yyyy').format(_selectedReminderDate!)}',
+                          ),
+                        ),
+                      ],
                     ],
                   ),
-                  const SizedBox(height: 16),
-
-                  // Notes
-                  TextField(
-                    controller: _notesController,
-                    maxLines: 4,
-                    decoration: const InputDecoration(
-                      labelText: 'Güvenli Ek Notlar (2FA Kurtarma Kodları, PIN vb.)',
-                      alignLabelWithHint: true,
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-
-                  // Password History (if available)
-                  if (widget.initialItem != null && widget.initialItem!.passwordHistory.isNotEmpty) ...[
-                    const SizedBox(height: 20),
-                    ExpansionTile(
-                      title: Text(
-                        'Eski Şifre Geçmişi (${widget.initialItem!.passwordHistory.length})',
-                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    ..._tags.map(
+                      (tag) => Chip(
+                        label: Text('#$tag', style: const TextStyle(fontSize: 12)),
+                        onDeleted: () => _removeTag(tag),
+                        visualDensity: VisualDensity.compact,
                       ),
-                      children: widget.initialItem!.passwordHistory.map((oldPass) {
-                        return ListTile(
-                          dense: true,
-                          leading: const Icon(Icons.history, size: 18),
-                          title: Text(oldPass, style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.copy, size: 16),
-                            onPressed: () => ClipboardService.copySecurely(oldPass),
+                    ),
+                    SizedBox(
+                      width: 150,
+                      child: TextField(
+                        controller: _tagInputController,
+                        decoration: const InputDecoration(
+                          hintText: '+ Etiket ekle',
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 8,
                           ),
-                        );
-                      }).toList(),
+                        ),
+                        onSubmitted: _addTag,
+                      ),
                     ),
                   ],
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _notesController,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: 'Ek Notlar / Kurtarma Kodları',
+                    alignLabelWithHint: true,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                CustomFieldsEditor(
+                  fields: _customFields,
+                  onChanged: (next) => setState(() => _customFields = next),
+                ),
+                if (passHistory.isNotEmpty) ...[
+                  const SizedBox(height: 24),
+                  Text(
+                    'Eski Şifre Geçmişi (${passHistory.length})',
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ...passHistory.map(
+                    (oldPass) => Card(
+                      child: ListTile(
+                        dense: true,
+                        title: Text(
+                          '•' * oldPass.length,
+                          style: const TextStyle(fontFamily: 'monospace'),
+                        ),
+                        subtitle: const Text('Önceki parola'),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.restore, size: 18),
+                              tooltip: 'Bu Parolayı Geri Yükle',
+                              onPressed: () {
+                                setState(() {
+                                  _passwordController.text = oldPass;
+                                });
+                              },
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.copy, size: 18),
+                              onPressed: () => _copyField(oldPass, 'Eski parola'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 ],
-              ),
+              ],
             ),
           ),
         ),

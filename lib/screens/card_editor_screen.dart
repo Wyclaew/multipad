@@ -1,13 +1,24 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../l10n/app_localizations.dart';
 import '../models/vault_item.dart';
+import '../providers/settings_provider.dart';
 import '../providers/vault_provider.dart';
+import '../services/audit_service.dart';
 import '../services/clipboard_service.dart';
+import '../widgets/custom_fields_editor.dart';
+import '../widgets/folder_selector.dart';
+import '../widgets/revision_history_sheet.dart';
 
 class CardEditorScreen extends StatefulWidget {
   final VaultItem? initialItem;
+  final String? initialFolderId;
 
-  const CardEditorScreen({super.key, this.initialItem});
+  const CardEditorScreen({
+    super.key,
+    this.initialItem,
+    this.initialFolderId,
+  });
 
   @override
   State<CardEditorScreen> createState() => _CardEditorScreenState();
@@ -23,16 +34,20 @@ class _CardEditorScreenState extends State<CardEditorScreen> {
   late TextEditingController _notesController;
   late TextEditingController _tagInputController;
   late List<String> _tags;
+  late List<CustomField> _customFields;
+  late List<VaultItemRevision> _revisions;
+  String? _folderId;
+
   late bool _isFavorite;
   late bool _isPinned;
-
-  late String _originalTitle;
-  late String _originalNumber;
-
-  bool _obscureNumber = true;
+  bool _obscureNumber = false;
   bool _obscureCvv = true;
   bool _obscurePin = true;
   bool _isSaving = false;
+
+  late String _originalTitle;
+  late String _originalNumber;
+  late String? _originalFolderId;
 
   @override
   void initState() {
@@ -49,7 +64,12 @@ class _CardEditorScreenState extends State<CardEditorScreen> {
     _pinController = TextEditingController(text: item?.cardPin ?? '');
     _notesController = TextEditingController(text: item?.content ?? '');
     _tagInputController = TextEditingController();
-    _tags = List<String>.from(item?.tags ?? []);
+    _tags = List<String>.from(item?.tags ?? const []);
+    _customFields = List<CustomField>.from(item?.customFields ?? const []);
+    _revisions = List<VaultItemRevision>.from(item?.revisions ?? const []);
+    _folderId = item?.folderId ?? widget.initialFolderId;
+    _originalFolderId = _folderId;
+
     _isFavorite = item?.isFavorite ?? false;
     _isPinned = item?.isPinned ?? false;
   }
@@ -67,41 +87,55 @@ class _CardEditorScreenState extends State<CardEditorScreen> {
     super.dispose();
   }
 
-  bool get _hasUnsavedChanges {
-    return _titleController.text != _originalTitle ||
-        _numberController.text != _originalNumber;
+  bool get _hasUnsavedChanges =>
+      _titleController.text != _originalTitle ||
+      _numberController.text != _originalNumber ||
+      _folderId != _originalFolderId;
+
+  Future<void> _copyField(String value, String label) async {
+    final timeout = context.read<SettingsProvider>().clipboardTimeoutSeconds;
+    await ClipboardService.copySecurely(value, timeoutSeconds: timeout);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(context.l10n.copiedWithTimeout(label, timeout))),
+    );
   }
 
-  Future<void> _save() async {
+  Future<void> _saveCard() async {
     final title = _titleController.text.trim();
     if (title.isEmpty && _numberController.text.isEmpty) {
-      Navigator.of(context).pop();
+      Navigator.pop(context);
       return;
     }
 
     setState(() => _isSaving = true);
     final vault = context.read<VaultProvider>();
-
     final updated = (widget.initialItem ?? vault.createNewCard()).copyWith(
-      title: title.isEmpty ? 'İsimsiz Kart' : title,
+      title: title.isEmpty ? 'Adsız Kart' : title,
       cardHolder: _holderController.text.trim(),
       cardNumber: _numberController.text.trim(),
       cardExpiry: _expiryController.text.trim(),
       cardCvv: _cvvController.text.trim(),
       cardPin: _pinController.text.trim(),
       content: _notesController.text.trim(),
+      folderId: _folderId,
+      clearFolderId: _folderId == null,
       tags: _tags,
+      customFields: _customFields,
+      revisions: _revisions,
       isFavorite: _isFavorite,
       isPinned: _isPinned,
-      clientUpdatedAt: DateTime.now().toUtc(),
     );
 
     await vault.saveItem(updated);
     _originalTitle = _titleController.text;
     _originalNumber = _numberController.text;
-    setState(() => _isSaving = false);
+    _originalFolderId = _folderId;
 
-    if (mounted) Navigator.of(context).pop();
+    if (mounted) {
+      setState(() => _isSaving = false);
+      Navigator.pop(context);
+    }
   }
 
   void _addTag(String rawTag) {
@@ -114,283 +148,290 @@ class _CardEditorScreenState extends State<CardEditorScreen> {
     }
   }
 
-  void _removeTag(String tag) {
-    setState(() => _tags.remove(tag));
-  }
+  void _removeTag(String tag) => setState(() => _tags.remove(tag));
 
-  Future<void> _delete() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Kartı Çöpe Taşı'),
-        content: const Text('Bu kart bilgilerini çöp kutusuna taşımak istediğinize emin misiniz?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Vazgeç')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Çöpe Taşı'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed == true && mounted) {
-      if (widget.initialItem != null) {
-        await context.read<VaultProvider>().moveToTrash(widget.initialItem!);
-      }
-      if (mounted) Navigator.of(context).pop();
-    }
-  }
-
-  Future<bool> _handlePop() async {
+  Future<bool> _confirmDiscard() async {
     if (!_hasUnsavedChanges) return true;
-
-    final shouldDiscard = await showDialog<bool>(
+    final res = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Kaydedilmemiş Değişiklikler'),
-        content: const Text('Kart bilgilerinde kaydedilmemiş değişiklikler var. Çıkmak istediğinize emin misiniz?'),
+        content: const Text(
+          'Kart bilgileriniz kaydedilmedi. Çıkmak istediğinize emin misiniz?',
+        ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
+            onPressed: () => Navigator.pop(ctx, false),
             child: const Text('Düzenlemeye Devam Et'),
           ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Değişiklikleri Sil'),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Kaydetmeden Çık'),
           ),
         ],
       ),
     );
-
-    return shouldDiscard ?? false;
+    return res ?? false;
   }
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    final rawNum = _numberController.text;
+    final hasDigits = rawNum.replaceAll(RegExp(r'[^0-9]'), '').isNotEmpty;
+    final luhnOk = !hasDigits || AuditService.isValidLuhn(rawNum);
+    final brand = hasDigits ? AuditService.detectCardBrand(rawNum) : 'Kart';
+    final expiryWarn = AuditService.evaluateCardExpiry(_expiryController.text);
+
     return PopScope(
       canPop: !_hasUnsavedChanges,
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
-        final shouldPop = await _handlePop();
-        if (shouldPop && context.mounted) {
+        final discard = await _confirmDiscard();
+        if (discard && context.mounted) {
           Navigator.of(context).pop();
         }
       },
       child: Scaffold(
         appBar: AppBar(
-          title: Text(widget.initialItem == null ? 'Yeni Kart Ekle' : 'Kartı Düzenle'),
+          title: Text(
+            widget.initialItem == null
+                ? l10n.tr('Yeni Ödeme Kartı', 'New Payment Card')
+                : l10n.tr('Kartı Düzenle', 'Edit Card'),
+          ),
           actions: [
+            if (widget.initialItem != null)
+              IconButton(
+                icon: const Icon(Icons.history),
+                tooltip: l10n.tr('Sürüm Geçmişi', 'Version History'),
+                onPressed: () {
+                  RevisionHistorySheet.show(
+                    context,
+                    item: widget.initialItem!.copyWith(
+                      title: _titleController.text,
+                      content: _notesController.text,
+                      revisions: _revisions,
+                    ),
+                    onRestore: (rev) {
+                      setState(() {
+                        _titleController.text = rev.title;
+                        _notesController.text = rev.content;
+                      });
+                    },
+                  );
+                },
+              ),
             IconButton(
               icon: Icon(_isPinned ? Icons.push_pin : Icons.push_pin_outlined),
-              color: _isPinned ? Colors.blueAccent : null,
-              tooltip: _isPinned ? 'Sabitlemeyi Kaldır' : 'Başa Sabitle',
+              color: _isPinned ? theme.colorScheme.primary : null,
               onPressed: () => setState(() => _isPinned = !_isPinned),
             ),
             IconButton(
-              icon: Icon(_isFavorite ? Icons.star_rounded : Icons.star_outline_rounded),
+              icon: Icon(_isFavorite ? Icons.star : Icons.star_border),
               color: _isFavorite ? Colors.amber : null,
-              tooltip: _isFavorite ? 'Favorilerden Çıkar' : 'Favorilere Ekle',
               onPressed: () => setState(() => _isFavorite = !_isFavorite),
             ),
-            if (widget.initialItem != null)
-              IconButton(
-                icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                tooltip: 'Çöpe Taşı',
-                onPressed: _delete,
-              ),
-            FilledButton.icon(
-              style: FilledButton.styleFrom(visualDensity: VisualDensity.compact),
-              icon: _isSaving
-                  ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Icon(Icons.save_outlined, size: 18),
-              label: const Text('Kaydet'),
-              onPressed: _isSaving ? null : _save,
-            ),
-            const SizedBox(width: 12),
+            if (_isSaving)
+              const Padding(
+                padding: EdgeInsets.all(14),
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              )
+            else
+              IconButton(icon: const Icon(Icons.check), onPressed: _saveCard),
           ],
         ),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 680),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Title (Card label)
-                  TextField(
-                    controller: _titleController,
-                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                    decoration: const InputDecoration(
-                      labelText: 'Kart Adı / Etiketi',
-                      hintText: 'Örn: Ana Banka Kartım, Şirket Kredi Kartı',
-                      prefixIcon: Icon(Icons.credit_card_outlined),
-                      border: OutlineInputBorder(),
-                    ),
+        body: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 720),
+            child: ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                TextField(
+                  controller: _titleController,
+                  decoration: const InputDecoration(
+                    labelText: 'Kart Adı (örn. Garanti Bonus, Enpara)',
+                    prefixIcon: Icon(Icons.credit_card),
                   ),
-                  const SizedBox(height: 16),
-
-                  // Cardholder Name
-                  TextField(
-                    controller: _holderController,
-                    textCapitalization: TextCapitalization.characters,
-                    decoration: const InputDecoration(
-                      labelText: 'Kart Üzerindeki İsim',
-                      hintText: 'AHMET YILMAZ',
-                      prefixIcon: Icon(Icons.person_outline),
-                      border: OutlineInputBorder(),
-                    ),
+                ),
+                const SizedBox(height: 12),
+                FolderSelector(
+                  selectedFolderId: _folderId,
+                  onChanged: (v) => setState(() => _folderId = v),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _holderController,
+                  decoration: const InputDecoration(
+                    labelText: 'Kart Üzerindeki İsim',
+                    prefixIcon: Icon(Icons.person_outline),
                   ),
-                  const SizedBox(height: 16),
-
-                  // Card Number
-                  TextField(
-                    controller: _numberController,
-                    keyboardType: TextInputType.number,
-                    obscureText: _obscureNumber,
-                    style: TextStyle(
-                      fontFamily: 'monospace',
-                      letterSpacing: _obscureNumber ? 2 : 1.5,
-                    ),
-                    decoration: InputDecoration(
-                      labelText: 'Kart Numarası',
-                      hintText: '0000 0000 0000 0000',
-                      prefixIcon: const Icon(Icons.payment_outlined),
-                      border: const OutlineInputBorder(),
-                      suffixIcon: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: Icon(_obscureNumber ? Icons.visibility_outlined : Icons.visibility_off_outlined),
-                            onPressed: () => setState(() => _obscureNumber = !_obscureNumber),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _numberController,
+                  keyboardType: TextInputType.number,
+                  obscureText: _obscureNumber,
+                  onChanged: (_) => setState(() {}),
+                  decoration: InputDecoration(
+                    labelText: 'Kart Numarası',
+                    prefixIcon: const Icon(Icons.numbers),
+                    suffixIcon: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: Icon(
+                            _obscureNumber
+                                ? Icons.visibility
+                                : Icons.visibility_off,
                           ),
-                          IconButton(
-                            icon: const Icon(Icons.copy, size: 18),
-                            tooltip: 'Kart Numarasını Kopyala (30 sn)',
-                            onPressed: () async {
-                              if (_numberController.text.isNotEmpty) {
-                                await ClipboardService.copySecurely(_numberController.text);
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(content: Text('Kart numarası kopyalandı! (30 sn güvenli)')),
-                                  );
-                                }
-                              }
-                            },
-                          ),
-                        ],
-                      ),
+                          onPressed: () =>
+                              setState(() => _obscureNumber = !_obscureNumber),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.copy),
+                          onPressed: () {
+                            if (_numberController.text.isNotEmpty) {
+                              _copyField(
+                                _numberController.text,
+                                'Kart numarası',
+                              );
+                            }
+                          },
+                        ),
+                      ],
                     ),
                   ),
-                  const SizedBox(height: 16),
-
-                  // Expiry & CVV & PIN Row
+                ),
+                if (hasDigits) ...[
+                  const SizedBox(height: 8),
                   Row(
                     children: [
-                      // Expiry
-                      Expanded(
-                        flex: 4,
-                        child: TextField(
-                          controller: _expiryController,
-                          keyboardType: TextInputType.datetime,
-                          decoration: const InputDecoration(
-                            labelText: 'Son Kullanma',
-                            hintText: 'AA/YY',
-                            prefixIcon: Icon(Icons.calendar_today_outlined),
-                            border: OutlineInputBorder(),
-                          ),
+                      Chip(
+                        avatar: Icon(
+                          luhnOk ? Icons.verified : Icons.error_outline,
+                          size: 16,
+                          color: luhnOk ? Colors.green : Colors.redAccent,
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                      // CVV
-                      Expanded(
-                        flex: 3,
-                        child: TextField(
-                          controller: _cvvController,
-                          keyboardType: TextInputType.number,
-                          obscureText: _obscureCvv,
-                          maxLength: 4,
-                          decoration: InputDecoration(
-                            labelText: 'CVV / CVC',
-                            counterText: '',
-                            prefixIcon: const Icon(Icons.security_outlined),
-                            border: const OutlineInputBorder(),
-                            suffixIcon: IconButton(
-                              icon: Icon(_obscureCvv ? Icons.visibility_outlined : Icons.visibility_off_outlined, size: 18),
-                              onPressed: () => setState(() => _obscureCvv = !_obscureCvv),
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      // PIN
-                      Expanded(
-                        flex: 3,
-                        child: TextField(
-                          controller: _pinController,
-                          keyboardType: TextInputType.number,
-                          obscureText: _obscurePin,
-                          maxLength: 6,
-                          decoration: InputDecoration(
-                            labelText: 'Kart PIN',
-                            counterText: '',
-                            prefixIcon: const Icon(Icons.lock_clock_outlined),
-                            border: const OutlineInputBorder(),
-                            suffixIcon: IconButton(
-                              icon: Icon(_obscurePin ? Icons.visibility_outlined : Icons.visibility_off_outlined, size: 18),
-                              onPressed: () => setState(() => _obscurePin = !_obscurePin),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Tags
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      ..._tags.map(
-                        (tag) => Chip(
-                          label: Text('#$tag', style: const TextStyle(fontSize: 12)),
-                          onDeleted: () => _removeTag(tag),
-                          visualDensity: VisualDensity.compact,
-                        ),
-                      ),
-                      SizedBox(
-                        width: 130,
-                        child: TextField(
-                          controller: _tagInputController,
+                        label: Text(
+                          luhnOk
+                              ? '$brand • Luhn Geçerli'
+                              : '$brand • Luhn Hatası (Numarayı kontrol edin)',
                           style: const TextStyle(fontSize: 12),
-                          decoration: const InputDecoration(
-                            hintText: '+ etiket ekle',
-                            border: InputBorder.none,
-                            isDense: true,
-                          ),
-                          onSubmitted: _addTag,
                         ),
                       ),
                     ],
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Notes
-                  TextField(
-                    controller: _notesController,
-                    maxLines: 4,
-                    decoration: const InputDecoration(
-                      labelText: 'Güvenli Notlar (Müşteri no, IBAN, banka şubesi vb.)',
-                      alignLabelWithHint: true,
-                      border: OutlineInputBorder(),
-                    ),
                   ),
                 ],
-              ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _expiryController,
+                        onChanged: (_) => setState(() {}),
+                        decoration: const InputDecoration(
+                          labelText: 'Son Kullanma (AA/YY)',
+                          prefixIcon: Icon(Icons.date_range),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextField(
+                        controller: _cvvController,
+                        keyboardType: TextInputType.number,
+                        obscureText: _obscureCvv,
+                        decoration: InputDecoration(
+                          labelText: 'CVV / CVC',
+                          prefixIcon: const Icon(Icons.security),
+                          suffixIcon: IconButton(
+                            icon: Icon(
+                              _obscureCvv
+                                  ? Icons.visibility
+                                  : Icons.visibility_off,
+                            ),
+                            onPressed: () =>
+                                setState(() => _obscureCvv = !_obscureCvv),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                if (expiryWarn != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    expiryWarn,
+                    style: const TextStyle(color: Colors.orange, fontSize: 12),
+                  ),
+                ],
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _pinController,
+                  keyboardType: TextInputType.number,
+                  obscureText: _obscurePin,
+                  decoration: InputDecoration(
+                    labelText: 'Kart PIN Kodu (İsteğe Bağlı)',
+                    prefixIcon: const Icon(Icons.dialpad),
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                        _obscurePin ? Icons.visibility : Icons.visibility_off,
+                      ),
+                      onPressed: () => setState(() => _obscurePin = !_obscurePin),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    ..._tags.map(
+                      (tag) => Chip(
+                        label: Text('#$tag', style: const TextStyle(fontSize: 12)),
+                        onDeleted: () => _removeTag(tag),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                    SizedBox(
+                      width: 150,
+                      child: TextField(
+                        controller: _tagInputController,
+                        decoration: const InputDecoration(
+                          hintText: '+ Etiket ekle',
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 8,
+                          ),
+                        ),
+                        onSubmitted: _addTag,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _notesController,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: 'Banka Şubesi / Müşteri Hizmetleri / Ek Notlar',
+                    alignLabelWithHint: true,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                CustomFieldsEditor(
+                  fields: _customFields,
+                  onChanged: (next) => setState(() => _customFields = next),
+                ),
+              ],
             ),
           ),
         ),

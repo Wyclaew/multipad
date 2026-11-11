@@ -1,9 +1,17 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
+import 'l10n/app_localizations.dart';
 import 'providers/auth_provider.dart';
+import 'providers/settings_provider.dart';
 import 'providers/vault_provider.dart';
 import 'screens/auth_screen.dart';
 import 'screens/home_screen.dart';
+import 'services/native_bridge_service.dart';
+import 'widgets/quick_search_dialog.dart';
+
+final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -13,63 +21,234 @@ void main() async {
 class MultiPadApp extends StatelessWidget {
   const MultiPadApp({super.key});
 
+  ThemeData _buildTheme(Brightness brightness, {bool amoled = false}) {
+    final isDark = brightness == Brightness.dark;
+    final colorScheme = ColorScheme.fromSeed(
+      seedColor: isDark ? Colors.indigoAccent : Colors.indigo,
+      brightness: brightness,
+      surface: amoled ? Colors.black : null,
+    );
+
+    return ThemeData(
+      colorScheme: colorScheme,
+      useMaterial3: true,
+      scaffoldBackgroundColor: amoled ? Colors.black : null,
+      appBarTheme: amoled
+          ? const AppBarTheme(
+              backgroundColor: Colors.black,
+              surfaceTintColor: Colors.transparent,
+            )
+          : null,
+      cardTheme: CardThemeData(
+        elevation: 0,
+        color: amoled ? const Color(0xFF0A0A0E) : null,
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
+        ChangeNotifierProvider<SettingsProvider>(
+          create: (_) => SettingsProvider()..load(),
+        ),
         ChangeNotifierProvider<AuthProvider>(
           create: (_) => AuthProvider()..checkInitialState(),
         ),
-        ChangeNotifierProxyProvider<AuthProvider, VaultProvider>(
+        ChangeNotifierProxyProvider2<AuthProvider, SettingsProvider,
+            VaultProvider>(
           create: (context) {
             final auth = context.read<AuthProvider>();
+            final settings = context.read<SettingsProvider>();
             return VaultProvider(
-              cryptoService: auth.cryptoService,
-              supabaseService: auth.supabaseService,
-            );
-          },
-          update: (_, auth, vault) {
-            vault!.syncAuthState(
               isUnlocked: auth.isUnlocked,
               masterKey: auth.masterKey,
+              isDuressMode: auth.isDuressMode,
+            )..setAutofillEnabledSetting(settings.autofillEnabled);
+          },
+          update: (_, auth, settings, previous) {
+            final vault = previous ?? VaultProvider();
+            vault.setAutofillEnabledSetting(settings.autofillEnabled);
+            vault.syncAuthState(
+              isUnlocked: auth.isUnlocked,
+              masterKey: auth.masterKey,
+              isDuressMode: auth.isDuressMode,
             );
             return vault;
           },
         ),
       ],
-      child: MaterialApp(
-        title: 'MultiPad',
-        debugShowCheckedModeBanner: false,
-        themeMode: ThemeMode.system,
-        theme: ThemeData(
-          useMaterial3: true,
-          colorSchemeSeed: Colors.blueAccent,
-          brightness: Brightness.light,
-          cardTheme: const CardThemeData(elevation: 0),
-        ),
-        darkTheme: ThemeData(
-          useMaterial3: true,
-          colorSchemeSeed: Colors.blueAccent,
-          brightness: Brightness.dark,
-          cardTheme: const CardThemeData(elevation: 0),
-        ),
-        home: const AppRootRouter(),
+      child: Consumer2<AuthProvider, SettingsProvider>(
+        builder: (context, auth, settings, _) {
+          return MaterialApp(
+            navigatorKey: rootNavigatorKey,
+            title: 'MultiPad',
+            debugShowCheckedModeBanner: false,
+            themeMode: settings.themeMode,
+            theme: _buildTheme(Brightness.light),
+            darkTheme: _buildTheme(
+              Brightness.dark,
+              amoled: settings.isAmoledBlack,
+            ),
+            locale: settings.locale,
+            supportedLocales: const [Locale('tr'), Locale('en')],
+            localizationsDelegates: const [
+              AppLocalizations.delegate,
+              GlobalMaterialLocalizations.delegate,
+              GlobalWidgetsLocalizations.delegate,
+              GlobalCupertinoLocalizations.delegate,
+            ],
+            builder: (context, child) {
+              final media = MediaQuery.of(context);
+              return MediaQuery(
+                data: media.copyWith(
+                  textScaler: TextScaler.linear(settings.fontScale),
+                ),
+                child: _VaultLifecycleShell(
+                  child: child ?? const SizedBox.shrink(),
+                ),
+              );
+            },
+            home: auth.isUnlocked ? const HomeScreen() : const AuthScreen(),
+          );
+        },
       ),
     );
   }
 }
 
-class AppRootRouter extends StatelessWidget {
-  const AppRootRouter({super.key});
+class _VaultLifecycleShell extends StatefulWidget {
+  final Widget child;
+  const _VaultLifecycleShell({required this.child});
+
+  @override
+  State<_VaultLifecycleShell> createState() => _VaultLifecycleShellState();
+}
+
+class _VaultLifecycleShellState extends State<_VaultLifecycleShell>
+    with WidgetsBindingObserver {
+  Timer? _inactivityTimer;
+  int _lastTimeoutMinutes = -1;
+  bool _wasUnlocked = false;
+  bool _quickSearchDialogOpen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    NativeBridgeService.initialize(
+      onQuickSearchRequested: () => _handleQuickSearchRequested(),
+      onLockVaultRequested: _handleNativeLockRequested,
+    );
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final auth = context.watch<AuthProvider>();
+    final settings = context.watch<SettingsProvider>();
+    if (_lastTimeoutMinutes != settings.autoLockMinutes ||
+        _wasUnlocked != auth.isUnlocked) {
+      _lastTimeoutMinutes = settings.autoLockMinutes;
+      _wasUnlocked = auth.isUnlocked;
+      _resetInactivityTimer();
+    }
+  }
+
+  @override
+  void dispose() {
+    _inactivityTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  void _handleNativeLockRequested() {
+    if (!mounted) return;
+    context.read<AuthProvider>().lockVault(
+          reason: 'Sistem tepsisi / menü çubuğundan kilitlendi.',
+        );
+  }
+
+  Future<void> _handleQuickSearchRequested({
+    bool allowPostFrameRetry = true,
+  }) async {
+    if (!mounted || _quickSearchDialogOpen) return;
+    final ctx = rootNavigatorKey.currentContext;
+    if (ctx == null || !ctx.mounted) {
+      if (allowPostFrameRetry && mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            _handleQuickSearchRequested(allowPostFrameRetry: false);
+          }
+        });
+        WidgetsBinding.instance.ensureVisualUpdate();
+      }
+      return;
+    }
+    _quickSearchDialogOpen = true;
+    try {
+      await showDialog<void>(
+        context: ctx,
+        builder: (_) => const QuickSearchDialog(),
+      );
+    } finally {
+      _quickSearchDialogOpen = false;
+    }
+  }
+
+  void _resetInactivityTimer() {
+    _inactivityTimer?.cancel();
+    if (!mounted) return;
+    final auth = context.read<AuthProvider>();
+    final minutes = context.read<SettingsProvider>().autoLockMinutes;
+    if (!auth.isUnlocked || minutes <= 0) return;
+
+    _inactivityTimer = Timer(Duration(minutes: minutes), () {
+      if (!mounted) return;
+      final curAuth = context.read<AuthProvider>();
+      if (curAuth.isUnlocked && !curAuth.isAutoLockSuppressed) {
+        curAuth.lockVault(
+          reason: '$minutes dakikalık işlem yapılmama süresi doldu.',
+        );
+      } else if (curAuth.isUnlocked) {
+        _resetInactivityTimer();
+      }
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) return;
+    final auth = context.read<AuthProvider>();
+    final settings = context.read<SettingsProvider>();
+    // Only lock on true backgrounding (paused / hidden), NOT inactive (OS prompts/sheets).
+    if ((state == AppLifecycleState.paused ||
+            state == AppLifecycleState.hidden) &&
+        settings.lockOnBackground &&
+        auth.isUnlocked &&
+        !auth.isAutoLockSuppressed) {
+      auth.lockVault(reason: 'Uygulama arka plana alındığı için kilitlendi.');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final auth = context.watch<AuthProvider>();
-
-    if (auth.isUnlocked) {
-      return const HomeScreen();
-    } else {
-      return const AuthScreen();
-    }
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) => _resetInactivityTimer(),
+      onPointerMove: (_) => _resetInactivityTimer(),
+      child: Focus(
+        onKeyEvent: (_, __) {
+          _resetInactivityTimer();
+          return KeyEventResult.ignored;
+        },
+        child: widget.child,
+      ),
+    );
   }
 }

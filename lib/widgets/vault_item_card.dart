@@ -2,25 +2,30 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import '../l10n/app_localizations.dart';
 import '../models/vault_item.dart';
 import '../providers/auth_provider.dart';
+import '../providers/settings_provider.dart';
+import '../providers/vault_provider.dart';
+import '../services/audit_service.dart';
 import '../services/clipboard_service.dart';
 import '../services/totp_service.dart';
 
 class VaultItemCard extends StatefulWidget {
   final VaultItem item;
   final VoidCallback onTap;
-  final VoidCallback onToggleFavorite;
-  final VoidCallback onTogglePin;
-  final VoidCallback onMoveToTrash;
+  final VoidCallback? onLongPress;
+  final bool isSelectionMode;
+  final bool isSelected;
 
   const VaultItemCard({
     super.key,
     required this.item,
     required this.onTap,
-    required this.onToggleFavorite,
-    required this.onTogglePin,
-    required this.onMoveToTrash,
+    this.onLongPress,
+    this.isSelectionMode = false,
+    this.isSelected = false,
   });
 
   @override
@@ -42,30 +47,30 @@ class _VaultItemCardState extends State<VaultItemCard> {
   void didUpdateWidget(covariant VaultItemCard oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.item.totpSecret != widget.item.totpSecret) {
+      _totpTimer?.cancel();
       _initTotp();
     }
   }
 
   void _initTotp() {
-    _totpTimer?.cancel();
-    if (widget.item.totpSecret.trim().isNotEmpty) {
+    if (widget.item.type == VaultItemType.credential &&
+        widget.item.totpSecret.trim().isNotEmpty) {
       _updateTotp();
-      _totpTimer = Timer.periodic(const Duration(seconds: 1), (_) => _updateTotp());
-    } else {
-      _currentTotp = null;
+      _totpTimer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _updateTotp(),
+      );
     }
   }
 
   void _updateTotp() {
-    if (widget.item.totpSecret.trim().isEmpty) return;
+    if (!mounted) return;
     final code = TotpService.generateCode(widget.item.totpSecret);
     final remaining = TotpService.getRemainingSeconds();
-    if (mounted) {
-      setState(() {
-        _currentTotp = code;
-        _remainingSeconds = remaining;
-      });
-    }
+    setState(() {
+      _currentTotp = code;
+      _remainingSeconds = remaining;
+    });
   }
 
   @override
@@ -74,71 +79,185 @@ class _VaultItemCardState extends State<VaultItemCard> {
     super.dispose();
   }
 
+  Future<void> _copySecure(String value, String label) async {
+    final timeout = context.read<SettingsProvider>().clipboardTimeoutSeconds;
+    await ClipboardService.copySecurely(value, timeoutSeconds: timeout);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(context.l10n.copiedWithTimeout(label, timeout))),
+    );
+  }
+
+  void _showWifiQrDialog(VaultItem item) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(item.wifiSsid.isNotEmpty ? item.wifiSsid : item.title),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: QrImageView(
+                data: item.toWifiQrPayload(),
+                size: 200,
+                backgroundColor: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Güvenlik: ${item.wifiSecurity}',
+              style: const TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Kapat'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  bool _isPasswordExpiringSoon(VaultItem item, int globalDays) {
+    if (item.type != VaultItemType.credential) return false;
+    if (item.customExpiryDays == -1) return false;
+    if (item.customReminderDate != null) {
+      return DateTime.now().isAfter(item.customReminderDate!);
+    }
+    final activeDays = item.customExpiryDays ?? globalDays;
+    if (activeDays <= 0) return false;
+    final baseDate = item.passwordLastModified ?? item.clientUpdatedAt;
+    return DateTime.now().toUtc().difference(baseDate).inDays >= activeDays;
+  }
+
+  IconData _iconForType(VaultItemType type) {
+    switch (type) {
+      case VaultItemType.credential:
+        return Icons.key;
+      case VaultItemType.card:
+        return Icons.credit_card;
+      case VaultItemType.secret:
+        return Icons.enhanced_encryption;
+      case VaultItemType.wifi:
+        return Icons.wifi;
+      case VaultItemType.identity:
+        return Icons.badge_outlined;
+      case VaultItemType.license:
+        return Icons.verified_user_outlined;
+      case VaultItemType.note:
+      case VaultItemType.folder:
+        return Icons.description_outlined;
+    }
+  }
+
+  Color _colorForType(VaultItemType type) {
+    switch (type) {
+      case VaultItemType.credential:
+        return Colors.indigoAccent;
+      case VaultItemType.card:
+        return Colors.tealAccent.shade700;
+      case VaultItemType.secret:
+        return Colors.purpleAccent;
+      case VaultItemType.wifi:
+        return Colors.lightBlueAccent;
+      case VaultItemType.identity:
+        return Colors.orangeAccent;
+      case VaultItemType.license:
+        return Colors.greenAccent.shade700;
+      case VaultItemType.note:
+      case VaultItemType.folder:
+        return Colors.amberAccent.shade700;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final vault = context.read<VaultProvider>();
     final auth = context.watch<AuthProvider>();
     final item = widget.item;
-    final theme = Theme.of(context);
-    final dateFormat = DateFormat('dd MMM, HH:mm');
 
-    final bool isExpired = item.isPasswordExpired(auth.globalPasswordExpiryDays);
+    final isExpiring = _isPasswordExpiringSoon(
+      item,
+      auth.globalPasswordExpiryDays,
+    );
+    final icon = _iconForType(item.type);
+    final typeColor = _colorForType(item.type);
 
-    Color typeColor = Colors.blueAccent;
-    IconData typeIcon = Icons.description_outlined;
-
-    switch (item.type) {
-      case VaultItemType.credential:
-        typeColor = Colors.purpleAccent;
-        typeIcon = Icons.vpn_key_outlined;
-        break;
-      case VaultItemType.card:
-        typeColor = Colors.orangeAccent;
-        typeIcon = Icons.credit_card_outlined;
-        break;
-      case VaultItemType.secret:
-        typeColor = Colors.tealAccent;
-        typeIcon = Icons.security_outlined;
-        break;
-      case VaultItemType.note:
-      default:
-        typeColor = Colors.blueAccent;
-        typeIcon = Icons.description_outlined;
-        break;
+    String subtitle = '';
+    if (item.type == VaultItemType.credential) {
+      subtitle = item.username.isNotEmpty
+          ? item.username
+          : (item.website.isNotEmpty ? item.website : 'Şifre Kaydı');
+    } else if (item.type == VaultItemType.card) {
+      final cleanNum = item.cardNumber.replaceAll(' ', '');
+      final last4 = cleanNum.length >= 4
+          ? '•••• ${cleanNum.substring(cleanNum.length - 4)}'
+          : '••••';
+      final brand = cleanNum.isNotEmpty
+          ? AuditService.detectCardBrand(cleanNum)
+          : 'Kart';
+      subtitle = '${item.cardHolder.isNotEmpty ? "${item.cardHolder} • " : ""}$brand $last4';
+    } else if (item.type == VaultItemType.secret) {
+      subtitle = item.secretType;
+    } else if (item.type == VaultItemType.wifi) {
+      subtitle = 'SSID: ${item.wifiSsid} (${item.wifiSecurity})';
+    } else if (item.type == VaultItemType.identity) {
+      subtitle = item.fullName.isNotEmpty ? item.fullName : item.idNumber;
+    } else if (item.type == VaultItemType.license) {
+      subtitle = item.productName.isNotEmpty ? item.productName : item.licensedTo;
+    } else {
+      subtitle = item.content.replaceAll('\n', ' ').trim();
+      if (subtitle.length > 70) {
+        subtitle = '${subtitle.substring(0, 70)}...';
+      }
     }
 
     return Card(
-      elevation: 0,
-      margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(14),
-        side: BorderSide(
-          color: isExpired
-              ? Colors.amber.withOpacity(0.8)
-              : item.isPinned
-                  ? Colors.blueAccent.withOpacity(0.5)
-                  : theme.colorScheme.outlineVariant.withOpacity(0.6),
-          width: (item.isPinned || isExpired) ? 1.5 : 1.0,
-        ),
-      ),
+      margin: const EdgeInsets.only(bottom: 12),
+      shape: widget.isSelected
+          ? RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(color: theme.colorScheme.primary, width: 2),
+            )
+          : null,
       child: InkWell(
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(16),
         onTap: widget.onTap,
+        onLongPress: widget.onLongPress,
         child: Padding(
           padding: const EdgeInsets.all(14),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Header: Icon + Title + Actions
               Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: typeColor.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(10),
+                  if (widget.isSelectionMode)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 10, top: 6),
+                      child: Checkbox(
+                        value: widget.isSelected,
+                        onChanged: (_) => widget.onTap(),
+                      ),
+                    )
+                  else
+                    Container(
+                      width: 42,
+                      height: 42,
+                      decoration: BoxDecoration(
+                        color: typeColor.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(icon, color: typeColor, size: 22),
                     ),
-                    child: Icon(typeIcon, size: 20, color: typeColor),
-                  ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
@@ -146,262 +265,254 @@ class _VaultItemCardState extends State<VaultItemCard> {
                       children: [
                         Row(
                           children: [
-                            if (item.isPinned) ...[
-                              const Icon(Icons.push_pin, size: 14, color: Colors.blueAccent),
-                              const SizedBox(width: 4),
-                            ],
+                            if (item.isPinned)
+                              const Padding(
+                                padding: EdgeInsets.only(right: 4),
+                                child: Icon(
+                                  Icons.push_pin,
+                                  size: 14,
+                                  color: Colors.indigoAccent,
+                                ),
+                              ),
                             Expanded(
                               child: Text(
-                                item.title.trim().isEmpty ? 'İsimsiz Öğe' : item.title,
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w600,
+                                item.title.isEmpty
+                                    ? 'Başlıksız Öğe'
+                                    : item.title,
+                                style: theme.textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.bold,
                                 ),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
+                            if (isExpiring)
+                              Tooltip(
+                                message: 'Şifrenizi yenileme zamanı geldi!',
+                                child: Container(
+                                  margin: const EdgeInsets.only(left: 6),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.orangeAccent.withValues(
+                                      alpha: 0.2,
+                                    ),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: const Icon(
+                                    Icons.notifications_active,
+                                    color: Colors.orangeAccent,
+                                    size: 14,
+                                  ),
+                                ),
+                              ),
                           ],
                         ),
-                        if (item.type == VaultItemType.credential && item.website.trim().isNotEmpty)
+                        const SizedBox(height: 2),
+                        if (subtitle.isNotEmpty)
                           Text(
-                            item.website,
-                            style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
+                            subtitle,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.hintColor,
+                            ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                          ),
-                        if (item.type == VaultItemType.secret)
-                          Text(
-                            item.secretType,
-                            style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
                           ),
                       ],
                     ),
                   ),
-                  IconButton(
-                    icon: Icon(
-                      item.isPinned ? Icons.push_pin : Icons.push_pin_outlined,
-                      size: 20,
-                      color: item.isPinned ? Colors.blueAccent : theme.colorScheme.onSurfaceVariant,
+                  if (!widget.isSelectionMode) ...[
+                    if (item.type == VaultItemType.credential &&
+                        item.password.isNotEmpty)
+                      IconButton(
+                        icon: const Icon(Icons.copy_all_rounded, size: 20),
+                        tooltip: 'Şifreyi Kopyala',
+                        onPressed: () => _copySecure(item.password, 'Şifre'),
+                      ),
+                    if (item.type == VaultItemType.wifi)
+                      IconButton(
+                        icon: const Icon(Icons.qr_code_2, size: 20),
+                        tooltip: 'Wi-Fi QR Göster',
+                        onPressed: () => _showWifiQrDialog(item),
+                      ),
+                    if (item.type == VaultItemType.wifi &&
+                        item.wifiPassword.isNotEmpty)
+                      IconButton(
+                        icon: const Icon(Icons.copy, size: 19),
+                        tooltip: 'Wi-Fi Şifresini Kopyala',
+                        onPressed: () =>
+                            _copySecure(item.wifiPassword, 'Wi-Fi şifresi'),
+                      ),
+                    if (item.type == VaultItemType.card &&
+                        item.cardNumber.isNotEmpty)
+                      IconButton(
+                        icon: const Icon(Icons.copy, size: 19),
+                        tooltip: 'Kart Numarasını Kopyala',
+                        onPressed: () =>
+                            _copySecure(item.cardNumber, 'Kart numarası'),
+                      ),
+                    if (item.type == VaultItemType.secret &&
+                        item.password.isNotEmpty)
+                      IconButton(
+                        icon: const Icon(Icons.copy, size: 19),
+                        tooltip: 'Gizli Anahtarı Kopyala',
+                        onPressed: () =>
+                            _copySecure(item.password, 'Gizli anahtar'),
+                      ),
+                    if (item.type == VaultItemType.identity &&
+                        item.idNumber.isNotEmpty)
+                      IconButton(
+                        icon: const Icon(Icons.copy, size: 19),
+                        tooltip: 'Belge Numarasını Kopyala',
+                        onPressed: () =>
+                            _copySecure(item.idNumber, 'Belge numarası'),
+                      ),
+                    if (item.type == VaultItemType.license &&
+                        item.licenseKey.isNotEmpty)
+                      IconButton(
+                        icon: const Icon(Icons.copy, size: 19),
+                        tooltip: 'Lisans Anahtarını Kopyala',
+                        onPressed: () =>
+                            _copySecure(item.licenseKey, 'Lisans anahtarı'),
+                      ),
+                    IconButton(
+                      icon: Icon(
+                        item.isFavorite ? Icons.star : Icons.star_border,
+                        color: item.isFavorite ? Colors.amber : theme.hintColor,
+                        size: 20,
+                      ),
+                      onPressed: () => vault.toggleFavorite(item),
                     ),
-                    tooltip: item.isPinned ? 'Sabitlemeyi Kaldır' : 'Başa Sabitle',
-                    onPressed: widget.onTogglePin,
-                  ),
-                  IconButton(
-                    icon: Icon(
-                      item.isFavorite ? Icons.star_rounded : Icons.star_outline_rounded,
-                      color: item.isFavorite ? Colors.amber : theme.colorScheme.onSurfaceVariant,
-                    ),
-                    tooltip: item.isFavorite ? 'Favorilerden Çıkar' : 'Favorilere Ekle',
-                    onPressed: widget.onToggleFavorite,
-                  ),
+                  ],
                 ],
               ),
-
-              // Expired Password Alert Pill (Item 30)
-              if (isExpired) ...[
-                const SizedBox(height: 8),
+              if (_currentTotp != null) ...[
+                const SizedBox(height: 10),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
                   decoration: BoxDecoration(
-                    color: Colors.amber.withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: Colors.amber.withOpacity(0.4)),
+                    color: theme.colorScheme.primary.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(Icons.alarm_on_rounded, size: 14, color: Colors.amber),
+                      const Icon(
+                        Icons.security,
+                        size: 16,
+                        color: Colors.indigoAccent,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '${_currentTotp!.substring(0, 3)} ${_currentTotp!.substring(3)}',
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                          letterSpacing: 1.5,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          value: _remainingSeconds / 30.0,
+                          strokeWidth: 2.5,
+                          color: _remainingSeconds <= 5
+                              ? Colors.redAccent
+                              : theme.colorScheme.primary,
+                        ),
+                      ),
                       const SizedBox(width: 6),
                       Text(
-                        'Şifre Yenileme Zamanı Geldi (${item.passwordAgeDays} gündür güncel)',
-                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.amber),
+                        '${_remainingSeconds}s',
+                        style: TextStyle(fontSize: 11, color: theme.hintColor),
+                      ),
+                      const SizedBox(width: 8),
+                      InkWell(
+                        onTap: () => _copySecure(_currentTotp!, '2FA kodu'),
+                        child: const Icon(Icons.copy, size: 16),
                       ),
                     ],
                   ),
                 ),
               ],
-
-              const SizedBox(height: 10),
-
-              // Item Type Specific Content
-              if (item.type == VaultItemType.credential) ...[
-                if (item.username.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: Row(
-                      children: [
-                        Icon(Icons.person_outline, size: 16, color: theme.colorScheme.onSurfaceVariant),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            item.username,
-                            style: TextStyle(fontSize: 13, color: theme.colorScheme.onSurfaceVariant),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+              if (item.tags.isNotEmpty ||
+                  item.attachments.isNotEmpty ||
+                  item.customFields.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: [
+                    ...item.tags.map(
+                      (tag) => Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.surfaceContainerHighest
+                              .withValues(alpha: 0.6),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          '#$tag',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: theme.colorScheme.onSurfaceVariant,
                           ),
                         ),
-                      ],
-                    ),
-                  ),
-                Row(
-                  children: [
-                    Icon(Icons.lock_outline, size: 16, color: theme.colorScheme.onSurfaceVariant),
-                    const SizedBox(width: 6),
-                    const Text('••••••••••••', style: TextStyle(letterSpacing: 2, fontSize: 13)),
-                    const Spacer(),
-                    TextButton.icon(
-                      style: TextButton.styleFrom(
-                        visualDensity: VisualDensity.compact,
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                       ),
-                      icon: const Icon(Icons.copy_rounded, size: 16),
-                      label: const Text('Şifreyi Kopyala', style: TextStyle(fontSize: 12)),
-                      onPressed: () async {
-                        await ClipboardService.copySecurely(item.password);
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Şifre kopyalandı! (30 sn sonra temizlenir)')),
-                          );
-                        }
-                      },
                     ),
+                    if (item.attachments.isNotEmpty)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.teal.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          '📎 ${item.attachments.length} ek',
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                      ),
+                    if (item.customFields.isNotEmpty)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.indigo.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          '+${item.customFields.length} alan',
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                      ),
                   ],
                 ),
-                // Live 2FA / TOTP Box
-                if (_currentTotp != null) ...[
-                  const SizedBox(height: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: Colors.blueAccent.withOpacity(0.08),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.blueAccent.withOpacity(0.2)),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.phonelink_lock_rounded, size: 18, color: Colors.blueAccent),
-                        const SizedBox(width: 8),
-                        Text(
-                          '2FA Kodu: $_currentTotp',
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 14,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 1.5,
-                          ),
-                        ),
-                        const Spacer(),
-                        Text(
-                          '${_remainingSeconds}s',
-                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.blueAccent),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.copy, size: 16),
-                          tooltip: '2FA Kodunu Kopyala',
-                          onPressed: () async {
-                            await ClipboardService.copySecurely(_currentTotp!);
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('2FA kodu kopyalandı!')),
-                              );
-                            }
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ] else if (item.type == VaultItemType.card) ...[
-                Row(
-                  children: [
-                    Icon(Icons.payment_outlined, size: 16, color: theme.colorScheme.onSurfaceVariant),
-                    const SizedBox(width: 6),
-                    Text(
-                      item.cardNumber.length >= 4
-                          ? '•••• •••• •••• ${item.cardNumber.substring(item.cardNumber.length - 4)}'
-                          : '•••• •••• •••• ••••',
-                      style: const TextStyle(fontFamily: 'monospace', fontSize: 13, letterSpacing: 1.2),
-                    ),
-                    const Spacer(),
-                    if (item.cardExpiry.isNotEmpty)
-                      Text('SKT: ${item.cardExpiry}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                    const SizedBox(width: 8),
-                    IconButton(
-                      icon: const Icon(Icons.copy, size: 16),
-                      tooltip: 'Kart Numarasını Kopyala',
-                      onPressed: () async {
-                        await ClipboardService.copySecurely(item.cardNumber);
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Kart numarası kopyalandı!')),
-                          );
-                        }
-                      },
-                    ),
-                  ],
-                ),
-              ] else if (item.type == VaultItemType.secret) ...[
-                Row(
-                  children: [
-                    Icon(Icons.vpn_key_outlined, size: 16, color: theme.colorScheme.onSurfaceVariant),
-                    const SizedBox(width: 6),
-                    const Text('••••••••••••••••••••', style: TextStyle(letterSpacing: 2, fontSize: 12)),
-                    const Spacer(),
-                    IconButton(
-                      icon: const Icon(Icons.copy, size: 16),
-                      tooltip: 'Gizli Anahtarı Kopyala',
-                      onPressed: () async {
-                        await ClipboardService.copySecurely(item.password);
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Gizli anahtar kopyalandı!')),
-                          );
-                        }
-                      },
-                    ),
-                  ],
-                ),
-              ] else ...[
-                if (item.content.trim().isNotEmpty)
-                  Text(
-                    item.content,
-                    style: TextStyle(fontSize: 13, color: theme.colorScheme.onSurfaceVariant, height: 1.3),
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                  ),
               ],
-
-              const SizedBox(height: 10),
-
-              // Footer: Tags + Updated Date
+              const SizedBox(height: 6),
               Row(
+                mainAxisAlignment: MainAxisAlignment.end,
                 children: [
-                  if (item.tags.isNotEmpty)
-                    Expanded(
-                      child: Wrap(
-                        spacing: 6,
-                        runSpacing: 4,
-                        children: item.tags.take(3).map((tag) {
-                          return Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: theme.colorScheme.surfaceVariant,
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Text(
-                              '#$tag',
-                              style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurfaceVariant),
-                            ),
-                          );
-                        }).toList(),
-                      ),
-                    )
-                  else
-                    const Spacer(),
                   Text(
-                    dateFormat.format(item.clientUpdatedAt.toLocal()),
-                    style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurfaceVariant.withOpacity(0.8)),
+                    DateFormat('dd.MM.yyyy HH:mm').format(
+                      item.clientUpdatedAt.toLocal(),
+                    ),
+                    style: TextStyle(fontSize: 11, color: theme.hintColor),
                   ),
                 ],
               ),

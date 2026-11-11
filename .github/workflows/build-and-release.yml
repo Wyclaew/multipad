@@ -3,23 +3,47 @@ name: MultiPad CI/CD - Build & Release (Android, macOS, Windows)
 on:
   push:
     branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  # -------------------------------------------------------------
-  # 1. BUILD ANDROID APK
-  # -------------------------------------------------------------
-  build-android:
-    name: Build Android APK
+  quality-gate:
+    name: Quality Gate (Analyze & Test)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
+      - name: Install SQLite runtime library
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Run static analysis
+        run: flutter analyze
+
+      - name: Run unit & widget tests
+        run: flutter test
+
+  build-android:
+    name: Build Android APK
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -29,129 +53,62 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          cache: true
 
-      - name: Ensure Platform Files
-        run: flutter create . --platforms=android --org=com.multipad
-
-      - name: Configure Android Manifest & Permissions
+      - name: Ensure Android directory exists
         run: |
-          python3 - <<'EOF'
-          path = "android/app/src/main/AndroidManifest.xml"
-          with open(path, "r", encoding="utf-8") as f:
-              xml = f.read()
+          if [ ! -d "android" ]; then
+            flutter create . --platforms=android --org=com.multipad
+          fi
 
-          xml = xml.replace('android:label="multipad"', 'android:label="MultiPad"')
-
-          perms = [
-              "android.permission.INTERNET",
-              "android.permission.ACCESS_NETWORK_STATE",
-              "android.permission.ACCESS_WIFI_STATE",
-              "android.permission.CHANGE_WIFI_MULTICAST_STATE",
-              "android.permission.USE_BIOMETRIC",
-              "android.permission.USE_FINGERPRINT",
-          ]
-          inject = ""
-          for p in perms:
-              if p not in xml:
-                  inject += f'    <uses-permission android:name="{p}"/>\n'
-
-          if inject:
-              xml = xml.replace("<application", inject + "    <application", 1)
-
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(xml)
-          EOF
-
-      - name: Install Dependencies
+      - name: Get Flutter dependencies
         run: flutter pub get
 
-      - name: Build APK (Release)
+      - name: Build Android Release APK
         run: flutter build apk --release
 
-      - name: Rename APK
+      - name: Prepare APK artifact
         run: cp build/app/outputs/flutter-apk/app-release.apk MultiPad-Android.apk
 
-      - name: Upload Android Artifact
+      - name: Upload Android APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-apk
           path: MultiPad-Android.apk
 
-  # -------------------------------------------------------------
-  # 2. BUILD MACOS DMG
-  # -------------------------------------------------------------
   build-macos:
     name: Build macOS DMG
+    needs: quality-gate
     runs-on: macos-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          cache: true
 
-      - name: Enable macOS Desktop
-        run: flutter config --enable-macos-desktop
-
-      - name: Ensure Platform Files
-        run: flutter create . --platforms=macos --org=com.multipad
-
-      - name: Configure macOS Name, Entitlements & Plist
+      - name: Ensure macOS directory exists
         run: |
-          python3 - <<'EOF'
-          import os, plistlib
+          if [ ! -d "macos" ]; then
+            flutter create . --platforms=macos --org=com.multipad
+          fi
 
-          app_info = "macos/Runner/Configs/AppInfo.xcconfig"
-          if os.path.exists(app_info):
-              with open(app_info, "r", encoding="utf-8") as f:
-                  txt = f.read()
-              txt = txt.replace("PRODUCT_NAME = multipad", "PRODUCT_NAME = MultiPad")
-              with open(app_info, "w", encoding="utf-8") as f:
-                  f.write(txt)
-
-          # Configure entitlements for direct DMG distribution (no App Store provisioning profile)
-          for ent_path in ["macos/Runner/DebugProfile.entitlements", "macos/Runner/Release.entitlements"]:
-              if os.path.exists(ent_path):
-                  with open(ent_path, "rb") as f:
-                      data = plistlib.load(f)
-                  data["com.apple.security.app-sandbox"] = False
-                  data["com.apple.security.network.client"] = True
-                  data["com.apple.security.network.server"] = True
-                  data["com.apple.security.cs.allow-jit"] = True
-                  with open(ent_path, "wb") as f:
-                      plistlib.dump(data, f)
-
-          # Add Local Network & Touch ID usage descriptions to Info.plist
-          info_plist = "macos/Runner/Info.plist"
-          if os.path.exists(info_plist):
-              with open(info_plist, "rb") as f:
-                  plist_data = plistlib.load(f)
-              plist_data["CFBundleDisplayName"] = "MultiPad"
-              plist_data["NSLocalNetworkUsageDescription"] = "MultiPad ayni Wi-Fi agindaki telefonunuzla sifreli cihaz eslestirmesi yapabilmek icin yerel ag erisimi gerektirir."
-              plist_data["NSFaceIDUsageDescription"] = "MultiPad kasanizi Touch ID ile guvenli sekilde acmak icin kimlik dogrulamasi kullanir."
-              with open(info_plist, "wb") as f:
-                  plistlib.dump(plist_data, f)
-          EOF
-
-      - name: Install Dependencies
+      - name: Get Flutter dependencies
         run: flutter pub get
 
-      - name: Build macOS App (Release)
+      - name: Build macOS Release App
         run: flutter build macos --release
 
-      - name: Ad-Hoc Sign & Create DMG Bundle
+      - name: Sign App & Create DMG
         run: |
           APP_PATH="build/macos/Build/Products/Release/MultiPad.app"
           if [ ! -d "$APP_PATH" ]; then
             APP_PATH="build/macos/Build/Products/Release/multipad.app"
           fi
-
-          # Apply clean deep ad-hoc code signature for Apple Silicon / Intel compatibility
-          codesign --force --deep --sign - "$APP_PATH"
+          echo "Found app at: $APP_PATH"
+          xattr -cr "$APP_PATH" || true
+          codesign --force --deep --sign - "$APP_PATH" || true
 
           mkdir -p dmg_staging
           cp -R "$APP_PATH" "dmg_staging/MultiPad.app"
@@ -159,139 +116,143 @@ jobs:
 
           cat <<'GUIDE' > "dmg_staging/MACOS_ACMA_KILAVUZU.txt"
           MultiPad macOS Kurulum & Açma Kılavuzu
-          =====================================
+          ======================================
 
           1. "MultiPad.app" dosyasını yanındaki "Applications" (Uygulamalar) klasörüne sürükleyin.
           2. Uygulamalar'dan MultiPad'i ilk kez açtığınızda macOS, uygulama ücretli Apple Developer ID sertifikasıyla
              noter onaylı (notarized) olmadığı için "MultiPad açılmadı / Apple kötü amaçlı yazılım denetimi yapamadı"
-             uyarısı gösterebilir. (Açık kaynaklı bağımsız uygulamalarda normal bir macOS güvenlik adımıdır.)
-          3. Bu uyarıyı tek seferlik onaylamak için:
-             - Uyarı penceresinde "Bitti" (Done) butonuna basın.
-             - Mac ekranınızın sol üstünden Apple Menüsü -> Sistem Ayarları -> Gizlilik ve Güvenlik bölümüne gidin.
+             uyarısı gösterebilir. Bu normaldir. Açmak için Apple'ın resmi adımlarından birini izleyin:
+             YÖNTEM A (Sağ Tık):
+             - Applications klasöründe MultiPad.app üzerine sağ tıklayın (veya Control + tıklayın) ve "Aç"ı seçin.
+             - Açılan onay penceresinde tekrar "Aç" butonuna tıklayın.
+             YÖNTEM B (Sistem Ayarları):
+             - "Bitti"ye basın, ardından Apple menüsü -> Sistem Ayarları -> Gizlilik ve Güvenlik ekranını açın.
              - En alta kaydırın; "MultiPad açılması engellendi" yazısının yanındaki "Yine de Aç" (Open Anyway) butonuna tıklayın.
-             - Touch ID veya Mac şifrenizle onaylayın. Artık her zaman tek tıkla açılacaktır!
           GUIDE
 
           hdiutil create -volname "MultiPad" -srcfolder dmg_staging -ov -format UDZO MultiPad-macOS.dmg
 
-      - name: Upload macOS Artifact
+      - name: Upload macOS DMG artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
           path: MultiPad-macOS.dmg
 
-  # -------------------------------------------------------------
-  # 3. BUILD WINDOWS EXE / ZIP
-  # -------------------------------------------------------------
   build-windows:
-    name: Build Windows EXE Bundle
+    name: Build Windows ZIP
+    needs: quality-gate
     runs-on: windows-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          cache: true
 
-      - name: Enable Windows Desktop
-        run: flutter config --enable-windows-desktop
+      - name: Ensure Windows directory exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "windows")) {
+            flutter create . --platforms=windows --org=com.multipad
+          }
 
-      - name: Ensure Platform Files
-        run: flutter create . --platforms=windows --org=com.multipad
-
-      - name: Install Dependencies
+      - name: Get Flutter dependencies
         run: flutter pub get
 
-      - name: Build Windows Executable (Release)
+      - name: Build Windows Release
+        shell: pwsh
         run: |
           $env:CL = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
-          $env:_CL_ = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
           flutter build windows --release
 
-      - name: Package Windows Binary (Zip)
+      - name: Zip Windows Build
+        shell: pwsh
         run: |
-          Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath MultiPad-Windows.zip
+          Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath MultiPad-Windows.zip -Force
 
-      - name: Upload Windows Artifact
+      - name: Upload Windows ZIP artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-zip
           path: MultiPad-Windows.zip
 
-  # -------------------------------------------------------------
-  # 4. PUBLISH RELEASE & DELETE PREVIOUS RELEASES
-  # -------------------------------------------------------------
   release:
-    name: Publish Release & Cleanup Old Versions
+    name: Create GitHub Release (Replace Previous)
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
     needs: [build-android, build-macos, build-windows]
-    if: always() && (needs.build-android.result == 'success' || needs.build-macos.result == 'success' || needs.build-windows.result == 'success')
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Download Android Artifact
+      - name: Download Android APK
         uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
           name: android-apk
-          path: release_assets
+          path: release-assets
 
-      - name: Download macOS Artifact
+      - name: Download macOS DMG
         uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
           name: macos-dmg
-          path: release_assets
+          path: release-assets
 
-      - name: Download Windows Artifact
+      - name: Download Windows ZIP
         uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
           name: windows-zip
-          path: release_assets
+          path: release-assets
 
-      - name: Extract Current Version
+      - name: Compute SHA256SUMS.txt
+        run: |
+          cd release-assets
+          sha256sum MultiPad-Android.apk MultiPad-macOS.dmg MultiPad-Windows.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Read Version from pubspec.yaml
         id: get_version
         run: |
-          VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}' | tr -d '\r')
-          echo "VERSION=v$VERSION" >> $GITHUB_OUTPUT
-          echo "Current Version: v$VERSION"
+          RAW_VER=$(grep '^version:' pubspec.yaml | awk '{print $2}' | tr -d '\r')
+          CLEAN_VER=$(echo "$RAW_VER" | cut -d+ -f1)
+          echo "VERSION=v$CLEAN_VER" >> $GITHUB_OUTPUT
+          echo "Release version: v$CLEAN_VER"
 
-      - name: Delete Old Releases & Tags (Keep Only Latest)
+      - name: Delete ALL previous GitHub Releases & old tags
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Checking existing releases..."
           OLD_RELEASES=$(gh release list --json tagName -q '.[].tagName' || true)
           for tag in $OLD_RELEASES; do
             echo "Deleting old release: $tag"
             gh release delete "$tag" --yes --cleanup-tag || true
           done
 
-      - name: Create New GitHub Release
+      - name: Create Fresh Release with Artifacts & Checksums
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG_NAME="${{ steps.get_version.outputs.VERSION }}"
           gh release create "$TAG_NAME" \
-            release_assets/* \
+            release-assets/MultiPad-Android.apk \
+            release-assets/MultiPad-macOS.dmg \
+            release-assets/MultiPad-Windows.zip \
+            release-assets/SHA256SUMS.txt \
             --title "MultiPad $TAG_NAME" \
             --notes "### 🚀 MultiPad En Güncel Sürüm ($TAG_NAME)
 
-          **İndirme Seçenekleri:**
-          - 📱 **Android:** \`MultiPad-Android.apk\`
-          - 🍎 **macOS:** \`MultiPad-macOS.dmg\` (Applications kısayolu & Touch ID uyumlu)
-          - 🪟 **Windows:** \`MultiPad-Windows.zip\` (Zipten çıkarıp \`multipad.exe\` çalıştırın)
+          **İndirme Dosyaları:**
+          - 📱 **Android:** \`MultiPad-Android.apk\` (Uygulama içi SHA-256 doğrulamalı güncelleme + Android Autofill + FLAG_SECURE)
+          - 🍎 **macOS:** \`MultiPad-macOS.dmg\` (MultiPad.app, Touch ID, Menü Çubuğu + \`⌘⇧Space\` Hızlı Arama)
+          - 🪟 **Windows:** \`MultiPad-Windows.zip\` (Sistem Tepsisi, \`Ctrl+Shift+Space\` Hızlı Arama, \`multipad.exe\`)
+          - 🔐 **Bütünlük Kontrolü:** \`SHA256SUMS.txt\`
 
           **Öne Çıkan Yenilikler ($TAG_NAME):**
-          - 📲 **Aynı Wi-Fi'dan Tek Kodla Cihaz Eşleştirme (Zero-Type Setup):** Ayarları, Supabase anahtarlarını ve şifrelerinizi telefona elle yazmadan X25519 şifreli tünel ve 6 haneli PIN ile anında aktarın
-          - 🔐 **Uçtan Uca Şifreli Uzaktan Aktarım Kodu (\`MPSETUP:\`):** Farklı ağlardan da güvenli aktarım
-          - 🍎 **macOS Keychain & DMG İyileştirmeleri:** Applications kısayolu, ad-hoc imza ve Touch ID Keychain uyumluluğu
-          - 🔄 **Çift Yönlü Çevrimdışı Senkronizasyon (Offline-First Merge)**
-          - 🛡️ **Uçtan Uca Şifreleme (AES-256-GCM + PBKDF2-HMAC-SHA256) & Biyometrik Kilit**"
+          - **Güvenlik:** Argon2id KDF geçişi, Hızlı PIN, Sahte/Panik Kasası (Duress), Otomatik Kilit, Şifreli Güvenlik Günlüğü, Hesap 2FA (Supabase TOTP MFA) & tüm diğer oturumlardan çıkış.
+          - **Eşleştirme & Senkronizasyon:** SQLite yerel veritabanı + 3 yönlü çakışma çözümü, tam QR kod eşleştirme (\`MPPAIR:\` / \`MPSETUP:\` / \`otpauth://\`), LAN eşleştirme ve Aktarım Kodu düzeltmeleri.
+          - **Kasa & Üretkenlik:** Markdown & Yapılacak listeleri, şifreli dosya ekleri, Chrome/Edge/Bitwarden/KeePass içe aktarım, iç içe klasörler, özel alanlar, sürüm geçmişi, Wi-Fi/Kimlik/Lisans türleri, Luhn/phishing denetimi & tek tıkla şifre yenileme sihirbazı, AMOLED tema ve TR/EN dil desteği.
+
+          > **macOS İlk Açılış Notu:** Apple Developer ID noter onayı olmadığından ilk açılışta macOS uyarı verirse **Sağ tık -> Aç** veya *Sistem Ayarları -> Gizlilik ve Güvenlik -> Yine de Aç* adımlarını izleyin."

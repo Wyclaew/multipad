@@ -62,7 +62,7 @@ class SupabaseService {
 
       await Supabase.initialize(
         url: url,
-        anonKey: anonKey,
+        publishableKey: anonKey,
         debug: kDebugMode,
       );
 
@@ -166,11 +166,74 @@ class SupabaseService {
     );
   }
 
-  /// Sign out
-  Future<void> signOut() async {
+  /// Sign out local session (preserving other paired devices)
+  Future<void> signOut({SignOutScope scope = SignOutScope.local}) async {
     if (_client != null) {
-      await _client!.auth.signOut();
+      await _client!.auth.signOut(scope: scope);
     }
+  }
+
+  /// Revokes refresh tokens on all OTHER active devices while keeping the current session alive.
+  Future<void> signOutOtherDevices() async {
+    if (_client == null || currentUser == null) {
+      throw Exception('Bulut oturumu aktif değil.');
+    }
+    await _client!.auth.signOut(scope: SignOutScope.others);
+  }
+
+  // --- Supabase Account-Level TOTP MFA ---
+
+  /// Returns true when the current user has a verified TOTP factor and session is still aal1.
+  bool requiresMfaVerification() {
+    if (_client == null || currentUser == null) return false;
+    final aal = _client!.auth.mfa.getAuthenticatorAssuranceLevel();
+    return aal.nextLevel == AuthenticatorAssuranceLevels.aal2 &&
+        aal.currentLevel != AuthenticatorAssuranceLevels.aal2;
+  }
+
+  Future<List<Factor>> listTotpFactors() async {
+    if (_client == null || currentUser == null) return [];
+    final res = await _client!.auth.mfa.listFactors();
+    return res.totp;
+  }
+
+  Future<List<Factor>> listAllMfaFactors() async {
+    if (_client == null || currentUser == null) return [];
+    final res = await _client!.auth.mfa.listFactors();
+    return res.all;
+  }
+
+  Future<AuthMFAEnrollResponse> enrollTotpMfa({
+    String friendlyName = 'MultiPad',
+  }) async {
+    if (_client == null || currentUser == null) {
+      throw Exception('2FA etkinleştirmek için bulut oturumu açık olmalıdır.');
+    }
+    return await _client!.auth.mfa.enroll(
+      factorType: FactorType.totp,
+      issuer: 'MultiPad',
+      friendlyName: friendlyName,
+    );
+  }
+
+  Future<AuthMFAVerifyResponse> verifyTotpMfa({
+    required String factorId,
+    required String code,
+  }) async {
+    if (_client == null || currentUser == null) {
+      throw Exception('Bulut oturumu aktif değil.');
+    }
+    return await _client!.auth.mfa.challengeAndVerify(
+      factorId: factorId,
+      code: code.trim(),
+    );
+  }
+
+  Future<void> unenrollMfa(String factorId) async {
+    if (_client == null || currentUser == null) {
+      throw Exception('Bulut oturumu aktif değil.');
+    }
+    await _client!.auth.mfa.unenroll(factorId);
   }
 
   /// Fetch all vault items (including deletion tombstones for accurate offline sync)
@@ -191,6 +254,8 @@ class SupabaseService {
     if (_client == null || currentUser == null) return;
 
     final dataToSave = Map<String, dynamic>.from(itemMap);
+    dataToSave.remove('dirty');
+    dataToSave.remove('base_hash');
     dataToSave['user_id'] = currentUser!.id;
     dataToSave['updated_at'] = DateTime.now().toUtc().toIso8601String();
 
@@ -210,7 +275,9 @@ class SupabaseService {
   }
 
   /// Listen to real-time changes on vault_items table
-  RealtimeChannel? subscribeToVaultChanges(void Function(PostgresChangePayload payload) onData) {
+  RealtimeChannel? subscribeToVaultChanges(
+    void Function(PostgresChangePayload payload) onData,
+  ) {
     if (_client == null || currentUser == null) return null;
 
     final channel = _client!.channel('public:vault_items:${currentUser!.id}');

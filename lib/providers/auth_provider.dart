@@ -1,89 +1,184 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../constants.dart';
 import '../services/biometric_service.dart';
 import '../services/crypto_service.dart';
+import '../services/native_bridge_service.dart';
 import '../services/offline_storage_service.dart';
 import '../services/pairing_service.dart';
+import '../services/security_log_service.dart';
 import '../services/supabase_service.dart';
-import 'vault_provider.dart';
 
 enum VaultLockStatus {
-  needsSetup,       // Needs Supabase URL/Key configuration
-  lockedWithPass,   // Locked, master password or biometric required
-  unlocked,         // Unlocked and ready
+  needsSetup,
+  lockedWithPass,
+  mfaRequired,
+  unlocked,
 }
 
 class AuthProvider with ChangeNotifier {
   final CryptoService _cryptoService = CryptoService();
-  final BiometricService _biometricService = BiometricService();
   final SupabaseService _supabaseService = SupabaseService();
+  final BiometricService _biometricService = BiometricService();
+  final SecurityLogService _securityLogService = SecurityLogService();
+  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    mOptions: MacOsOptions(useDataProtectionKeyChain: false),
+  );
 
   VaultLockStatus _status = VaultLockStatus.needsSetup;
   List<int>? _masterKey;
   String? _currentUserEmail;
+  String? _currentSalt;
   bool _canUseBiometrics = false;
   bool _isBiometricEnabled = false;
-  int _globalPasswordExpiryDays = 90; // Default 90 days (0 = disabled)
+  bool _biometricDisabledDueToFailures = false;
+  bool _isQuickPinEnabled = false;
+  bool _isDuressEnabled = false;
+  bool _isDuressMode = false;
+  bool _preferArgon2id = true;
+  bool _hasVerifiedMfa = false;
+  int _globalPasswordExpiryDays = 90;
+  int _failedAttempts = 0;
+  DateTime? _lockoutUntil;
+  int _autoLockSuppressionDepth = 0;
   String? _errorMessage;
 
   VaultLockStatus get status => _status;
-  bool get isUnlocked => _status == VaultLockStatus.unlocked && _masterKey != null;
+  CryptoService get cryptoService => _cryptoService;
+  bool get isUnlocked =>
+      _status == VaultLockStatus.unlocked && _masterKey != null;
   List<int>? get masterKey => _masterKey;
   String? get currentUserEmail => _currentUserEmail;
+  String? get currentSalt => _currentSalt;
   bool get canUseBiometrics => _canUseBiometrics;
   bool get isBiometricEnabled => _isBiometricEnabled;
+  bool get isBiometricTemporarilyDisabled => _biometricDisabledDueToFailures;
+  bool get canUseBiometricsNow =>
+      _canUseBiometrics &&
+      _isBiometricEnabled &&
+      !_biometricDisabledDueToFailures &&
+      remainingLockout == Duration.zero;
+  bool get isQuickPinEnabled => _isQuickPinEnabled;
+  bool get isDuressEnabled => _isDuressEnabled;
+  bool get isDuressMode => _isDuressMode;
+  bool get preferArgon2id => _preferArgon2id;
+  bool get isArgon2idActive =>
+      _currentSalt != null && CryptoService.isArgon2idSalt(_currentSalt!);
+  bool get hasVerifiedMfa => _hasVerifiedMfa;
   int get globalPasswordExpiryDays => _globalPasswordExpiryDays;
+  int get failedAttempts => _failedAttempts;
+  DateTime? get lockoutUntil => _lockoutUntil;
+  bool get isAutoLockSuppressed => _autoLockSuppressionDepth > 0;
   String? get errorMessage => _errorMessage;
 
-  CryptoService get cryptoService => _cryptoService;
-  SupabaseService get supabaseService => _supabaseService;
+  Duration get remainingLockout {
+    if (_lockoutUntil == null) return Duration.zero;
+    final rem = _lockoutUntil!.difference(DateTime.now());
+    return rem.isNegative ? Duration.zero : rem;
+  }
 
-  /// Initial app startup check
+  void clearError() {
+    _errorMessage = null;
+    notifyListeners();
+  }
+
+  void beginSuppressAutoLock() {
+    _autoLockSuppressionDepth++;
+  }
+
+  void endSuppressAutoLock() {
+    if (_autoLockSuppressionDepth > 0) {
+      _autoLockSuppressionDepth--;
+    }
+  }
+
+  Future<T> runWithoutAutoLock<T>(Future<T> Function() action) async {
+    beginSuppressAutoLock();
+    try {
+      return await action();
+    } finally {
+      endSuppressAutoLock();
+    }
+  }
+
+  Future<void> _loadSecurityPreferences(SharedPreferences prefs) async {
+    _currentUserEmail = prefs.getString(AppConstants.keyCachedEmail);
+    _currentSalt = prefs.getString(AppConstants.keyMasterSalt);
+    _globalPasswordExpiryDays =
+        prefs.getInt(AppConstants.keyGlobalPasswordExpiryDays) ?? 90;
+    _preferArgon2id = prefs.getBool(AppConstants.keyPreferArgon2id) ?? true;
+    _isQuickPinEnabled = prefs.getBool(AppConstants.keyQuickPinEnabled) ?? false;
+    _isDuressEnabled = prefs.getBool(AppConstants.keyDuressEnabled) ?? false;
+    _failedAttempts = await _securityLogService.getFailedAttempts();
+    _biometricDisabledDueToFailures =
+        await _securityLogService.isBiometricTemporarilyDisabled();
+    final lockoutIso = prefs.getString(AppConstants.keyLockoutUntilIso);
+    _lockoutUntil = lockoutIso != null ? DateTime.tryParse(lockoutIso) : null;
+  }
+
+  Future<void> refreshSecurityState() async {
+    final prefs = await SharedPreferences.getInstance();
+    await _loadSecurityPreferences(prefs);
+    notifyListeners();
+  }
+
   Future<void> checkInitialState() async {
     final prefs = await SharedPreferences.getInstance();
-    final url = prefs.getString(AppConstants.keySupabaseUrl) ?? AppConstants.defaultSupabaseUrl;
-    final anonKey = prefs.getString(AppConstants.keySupabaseAnonKey) ?? AppConstants.defaultSupabaseAnonKey;
+    await _loadSecurityPreferences(prefs);
 
-    _globalPasswordExpiryDays = prefs.getInt(AppConstants.keyGlobalPasswordExpiryDays) ?? 90;
+    _canUseBiometrics = await _biometricService.canCheckBiometrics();
+    _isBiometricEnabled = await _biometricService.isBiometricUnlockEnabled();
 
-    if (url.trim().isEmpty || anonKey.trim().isEmpty) {
+    final hasLocalVault = _currentSalt != null && _currentSalt!.isNotEmpty;
+
+    final hasCustomConfig =
+        (prefs.getString(AppConstants.keySupabaseUrl) ?? '').isNotEmpty &&
+        (prefs.getString(AppConstants.keySupabaseAnonKey) ?? '').isNotEmpty;
+    final hasDefaultConfig =
+        AppConstants.defaultSupabaseUrl.isNotEmpty &&
+        AppConstants.defaultSupabaseAnonKey.isNotEmpty;
+
+    if (!hasCustomConfig && !hasDefaultConfig) {
       _status = VaultLockStatus.lockedWithPass;
-      _currentUserEmail = prefs.getString(AppConstants.keyCachedEmail) ?? 'Yerel Kasa Kullanıcısı';
-      _canUseBiometrics = await _biometricService.canCheckBiometrics();
-      _isBiometricEnabled = await _biometricService.isBiometricUnlockEnabled();
       notifyListeners();
-
-      if (_isBiometricEnabled && _canUseBiometrics) {
-        await unlockWithBiometrics();
-      }
       return;
     }
 
     final initialized = await SupabaseService.initialize();
-    if (!initialized) {
+    if (initialized) {
+      await refreshMfaStatus();
       _status = VaultLockStatus.lockedWithPass;
-      _currentUserEmail = prefs.getString(AppConstants.keyCachedEmail);
-      _canUseBiometrics = await _biometricService.canCheckBiometrics();
-      _isBiometricEnabled = await _biometricService.isBiometricUnlockEnabled();
       notifyListeners();
       return;
     }
 
-    _currentUserEmail = prefs.getString(AppConstants.keyCachedEmail);
-    _canUseBiometrics = await _biometricService.canCheckBiometrics();
-    _isBiometricEnabled = await _biometricService.isBiometricUnlockEnabled();
+    if (hasLocalVault) {
+      _status = VaultLockStatus.lockedWithPass;
+      notifyListeners();
+      return;
+    }
 
     _status = VaultLockStatus.lockedWithPass;
     notifyListeners();
+  }
 
-    if (_isBiometricEnabled && _canUseBiometrics) {
-      await unlockWithBiometrics();
+  Future<void> refreshMfaStatus() async {
+    if (!SupabaseService.isInitialized || SupabaseService.currentUser == null) {
+      _hasVerifiedMfa = false;
+      return;
+    }
+    try {
+      final factors = await _supabaseService.listTotpFactors();
+      _hasVerifiedMfa = factors.isNotEmpty;
+    } catch (_) {
+      _hasVerifiedMfa = false;
     }
   }
 
-  /// Change global password expiry days (0 = disabled, 30, 60, 90, 180, 365)
   Future<void> setGlobalPasswordExpiryDays(int days) async {
     _globalPasswordExpiryDays = days;
     final prefs = await SharedPreferences.getInstance();
@@ -91,53 +186,69 @@ class AuthProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  /// Configure or update Supabase credentials
+  Future<void> setPreferArgon2id(bool prefer) async {
+    _preferArgon2id = prefer;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConstants.keyPreferArgon2id, prefer);
+    notifyListeners();
+  }
+
   Future<bool> configureSupabase(String url, String anonKey) async {
     _errorMessage = null;
-    final success = await SupabaseService.initialize(customUrl: url, customAnonKey: anonKey);
+    final success = await SupabaseService.initialize(
+      customUrl: url,
+      customAnonKey: anonKey,
+    );
     if (success) {
+      await refreshMfaStatus();
       if (_status == VaultLockStatus.needsSetup) {
         _status = VaultLockStatus.lockedWithPass;
       }
       notifyListeners();
       return true;
     } else {
-      _errorMessage = 'Supabase bağlantısı başarısız oldu. URL ve API Anahtarını kontrol edin.';
+      _errorMessage =
+          'Supabase bağlantısı başarısız oldu. URL ve API Anahtarını kontrol edin.';
       notifyListeners();
       return false;
     }
   }
 
-  /// Connects Supabase while already unlocked in local-only mode and auto-syncs vault
   Future<bool> connectCloudWhileUnlocked({
     required String url,
     required String anonKey,
-    required VaultProvider vault,
+    String? accountEmail,
   }) async {
     _errorMessage = null;
-    if (_masterKey == null) {
-      _errorMessage = 'Önce kasanın kilidini açın.';
+    if (!isUnlocked || _masterKey == null || _isDuressMode) {
+      _errorMessage =
+          _isDuressMode ? 'Bu işlem mevcut modda kullanılamaz.' : 'Önce kasanın kilidini açın.';
+      notifyListeners();
       return false;
     }
 
-    final initialized = await SupabaseService.initialize(customUrl: url, customAnonKey: anonKey);
+    final initialized = await SupabaseService.initialize(
+      customUrl: url,
+      customAnonKey: anonKey,
+    );
     if (!initialized) {
-      _errorMessage = 'Supabase bağlantısı başarısız oldu. URL ve API Anahtarını kontrol edin.';
+      _errorMessage =
+          'Supabase bağlantısı başarısız oldu. URL ve API Anahtarını kontrol edin.';
       notifyListeners();
       return false;
     }
 
     final prefs = await SharedPreferences.getInstance();
-    final email = (_currentUserEmail ?? prefs.getString(AppConstants.keyCachedEmail) ?? '').trim().toLowerCase();
-    String? salt = prefs.getString(AppConstants.keyMasterSalt);
+    final email = (accountEmail ?? _currentUserEmail ?? '').trim().toLowerCase();
+    final salt = prefs.getString(AppConstants.keyMasterSalt);
 
     if (email.isEmpty || !email.contains('@')) {
-      _errorMessage = 'Bulut hesabı oluşturmak için geçerli bir e-posta ile giriş yapmış olmalısınız.';
+      _errorMessage =
+          'Bulut hesabı oluşturmak için geçerli bir e-posta ile giriş yapmış olmalısınız.';
       notifyListeners();
       return false;
     }
-
-    if (salt == null) {
+    if (salt == null || salt.isEmpty) {
       _errorMessage = 'Yerel kasa tuzu bulunamadı.';
       notifyListeners();
       return false;
@@ -161,19 +272,57 @@ class AuthProvider with ChangeNotifier {
       }
     }
 
-    await vault.loadVault();
+    await prefs.setString(AppConstants.keyCachedEmail, email);
+    _currentUserEmail = email;
+    await refreshMfaStatus();
     notifyListeners();
     return true;
   }
 
-  /// Sign up a new user with Master Password
-  Future<bool> register({required String email, required String masterPassword}) async {
-    _errorMessage = null;
-    final cleanEmail = email.trim().toLowerCase();
+  Future<bool> _checkLockoutBeforeAttempt() async {
+    final rem = await _securityLogService.getRemainingLockout();
+    final prefs = await SharedPreferences.getInstance();
+    await _loadSecurityPreferences(prefs);
+    if (rem > Duration.zero) {
+      final secs = rem.inSeconds + 1;
+      _errorMessage =
+          'Çok fazla hatalı deneme yapıldı. Güvenlik için $secs sn bekleyin.';
+      notifyListeners();
+      return true;
+    }
+    return false;
+  }
 
+  Future<void> _recordFailure(String sourceLabel, String baseError) async {
+    final res = await _securityLogService.recordFailedAttempt(
+      sourceLabel: sourceLabel,
+    );
+    final prefs = await SharedPreferences.getInstance();
+    await _loadSecurityPreferences(prefs);
+    if (res.lockoutDuration > Duration.zero) {
+      _errorMessage =
+          '$baseError (${res.failedCount}. hata — ${res.lockoutDuration.inSeconds} sn bekleme uygulanıyor.)';
+    } else {
+      _errorMessage = baseError;
+    }
+  }
+
+  Future<bool> register({
+    required String email,
+    required String masterPassword,
+    bool? useArgon2id,
+  }) async {
+    _errorMessage = null;
     try {
-      final salt = _cryptoService.generateSalt();
-      final derivedKey = await _cryptoService.deriveMasterKey(masterPassword, salt);
+      final cleanEmail = email.trim().toLowerCase();
+      final effectiveArgon = useArgon2id ?? _preferArgon2id;
+      final salt = _cryptoService.generateSalt(
+        useArgon2id: effectiveArgon,
+      );
+      final derivedKey = await _cryptoService.deriveMasterKey(
+        masterPassword,
+        salt,
+      );
       final authPassword = _cryptoService.deriveAuthPassword(derivedKey);
 
       if (SupabaseService.isInitialized) {
@@ -187,127 +336,631 @@ class AuthProvider with ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(AppConstants.keyMasterSalt, salt);
       await prefs.setString(AppConstants.keyCachedEmail, cleanEmail);
+      await _securityLogService.resetFailedAttempts();
+      await _loadSecurityPreferences(prefs);
 
-      _masterKey = derivedKey;
       _currentUserEmail = cleanEmail;
-      _canUseBiometrics = await _biometricService.canCheckBiometrics();
+      _currentSalt = salt;
+      _masterKey = derivedKey;
+      _isDuressMode = false;
       _status = VaultLockStatus.unlocked;
+      await _securityLogService.logEvent(
+        SecurityEventType.unlockSuccess,
+        'Yeni hesap ve kasa oluşturuldu (${CryptoService.isArgon2idSalt(salt) ? "Argon2id" : "PBKDF2"}).',
+      );
       notifyListeners();
       return true;
     } catch (e) {
-      _errorMessage = 'Kayıt hatası: ${e.toString()}';
+      _errorMessage = 'Kayıt hatası: ${e.toString().replaceAll("Exception: ", "")}';
       notifyListeners();
       return false;
     }
   }
 
-  /// Login with Master Password
-  Future<bool> login({required String email, required String masterPassword}) async {
+  Future<bool> _verifyLocalMasterKeyAgainstStoredItems(List<int> key) async {
+    final localRows = await OfflineStorageService.loadLocalItems();
+    if (localRows.isEmpty) {
+      return true;
+    }
+    for (final row in localRows) {
+      final ciphertext = row['encrypted_payload'] as String?;
+      final iv = row['iv'] as String?;
+      final mac = row['mac'] as String?;
+      if (ciphertext != null && iv != null && mac != null) {
+        try {
+          await _cryptoService.decryptData(
+            ciphertextBase64: ciphertext,
+            ivBase64: iv,
+            macBase64: mac,
+            masterKey: key,
+          );
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  Future<bool> login({
+    required String email,
+    required String masterPassword,
+  }) async {
     _errorMessage = null;
-    final cleanEmail = email.trim().toLowerCase();
+    if (await _checkLockoutBeforeAttempt()) {
+      return false;
+    }
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      final cachedEmail = prefs.getString(AppConstants.keyCachedEmail)?.trim().toLowerCase();
-      String? salt = (cachedEmail == cleanEmail) ? prefs.getString(AppConstants.keyMasterSalt) : null;
+      final cleanEmail = email.trim().toLowerCase();
+      final cachedEmail = prefs.getString(AppConstants.keyCachedEmail);
 
+      // 1. Check Duress / Panic Password first (for the cached/local account)
+      final duressEnabled = prefs.getBool(AppConstants.keyDuressEnabled) ?? false;
+      final duressSalt = prefs.getString(AppConstants.keyDuressSalt);
+      final duressVerifier = prefs.getString(AppConstants.keyDuressVerifier);
+      if (duressEnabled &&
+          duressSalt != null &&
+          duressVerifier != null &&
+          (cachedEmail == null || cachedEmail == cleanEmail)) {
+        final candidateDuressKey = await _cryptoService.deriveMasterKey(
+          masterPassword,
+          duressSalt,
+        );
+        final candidateVerifier = _cryptoService.deriveDuressVerifier(
+          candidateDuressKey,
+        );
+        if (CryptoService.constantTimeStringEquals(
+          candidateVerifier,
+          duressVerifier,
+        )) {
+          _currentUserEmail = cleanEmail;
+          _masterKey = candidateDuressKey;
+          _isDuressMode = true;
+          _status = VaultLockStatus.unlocked;
+          await _securityLogService.logEvent(
+            SecurityEventType.duressUnlocked,
+            'Panik/Sahte kasa parolası ile oturum açıldı.',
+            isWarning: true,
+          );
+          notifyListeners();
+          return true;
+        }
+      }
+
+      // 2. Normal login: locate salt (local cache or Supabase)
+      String? salt = (cachedEmail == cleanEmail)
+          ? prefs.getString(AppConstants.keyMasterSalt)
+          : null;
+
+      bool onlineReachable = false;
       if (salt == null && SupabaseService.isInitialized) {
-        salt = await _supabaseService.fetchUserMasterSalt(cleanEmail);
+        try {
+          salt = await _supabaseService.fetchUserMasterSalt(cleanEmail);
+          onlineReachable = true;
+        } catch (e) {
+          debugPrint('fetchUserMasterSalt fallback check: $e');
+        }
       }
 
       if (salt == null) {
-        // Fallback if single-user offline mode and cachedEmail wasn't set cleanly
-        if (!SupabaseService.isInitialized && prefs.getString(AppConstants.keyMasterSalt) != null && cachedEmail == null) {
+        if (!SupabaseService.isInitialized &&
+            prefs.getString(AppConstants.keyMasterSalt) != null &&
+            cachedEmail == null) {
           salt = prefs.getString(AppConstants.keyMasterSalt);
         }
       }
 
       if (salt == null) {
-        if (SupabaseService.isInitialized) {
-          throw Exception('Bu e-posta adresine ait bir hesap bulunamadı. Lütfen kontrol edin veya yeni kasa oluşturun.');
-        } else {
-          throw Exception('Cihazda kayıtlı yerel kasa bulunamadı. Lütfen önce "Yeni Kasa Oluştur" veya "Başka Cihazdan Aktar" seçeneğini kullanın.');
-        }
+        await _recordFailure(
+          'Ana Parola',
+          'Kullanıcı hesabı veya kasa tuzu bulunamadı.',
+        );
+        notifyListeners();
+        return false;
       }
 
-      final derivedKey = await _cryptoService.deriveMasterKey(masterPassword, salt);
+      final derivedKey = await _cryptoService.deriveMasterKey(
+        masterPassword,
+        salt,
+      );
       final authPassword = _cryptoService.deriveAuthPassword(derivedKey);
 
       if (SupabaseService.isInitialized) {
-        await _supabaseService.signIn(
-          email: cleanEmail,
-          authPassword: authPassword,
+        try {
+          await _supabaseService.signIn(
+            email: cleanEmail,
+            authPassword: authPassword,
+          );
+          onlineReachable = true;
+        } on AuthException catch (authErr) {
+          await _recordFailure(
+            'Ana Parola',
+            'Giriş başarısız: ${authErr.message}',
+          );
+          notifyListeners();
+          return false;
+        } catch (netErr) {
+          // Offline network error with matching local cached account: allow offline verify!
+          if (cachedEmail == cleanEmail &&
+              prefs.getString(AppConstants.keyMasterSalt) != null) {
+            final validLocal = await _verifyLocalMasterKeyAgainstStoredItems(
+              derivedKey,
+            );
+            if (!validLocal) {
+              await _recordFailure('Ana Parola', 'Ana parola hatalı.');
+              notifyListeners();
+              return false;
+            }
+          } else {
+            _errorMessage = 'Sunucuya erişilemedi: $netErr';
+            notifyListeners();
+            return false;
+          }
+        }
+      } else {
+        // Pure local mode: verify key if items exist
+        final validLocal = await _verifyLocalMasterKeyAgainstStoredItems(
+          derivedKey,
         );
+        if (!validLocal) {
+          await _recordFailure('Ana Parola', 'Ana parola hatalı.');
+          notifyListeners();
+          return false;
+        }
       }
 
       await prefs.setString(AppConstants.keyMasterSalt, salt);
       await prefs.setString(AppConstants.keyCachedEmail, cleanEmail);
+      await _securityLogService.resetFailedAttempts();
+      await _loadSecurityPreferences(prefs);
 
-      _masterKey = derivedKey;
       _currentUserEmail = cleanEmail;
-      _canUseBiometrics = await _biometricService.canCheckBiometrics();
-      _status = VaultLockStatus.unlocked;
+      _currentSalt = salt;
+      _masterKey = derivedKey;
+      _isDuressMode = false;
+
+      if (onlineReachable && _supabaseService.requiresMfaVerification()) {
+        _hasVerifiedMfa = true;
+        _status = VaultLockStatus.mfaRequired;
+      } else {
+        if (onlineReachable) {
+          await refreshMfaStatus();
+        }
+        _status = VaultLockStatus.unlocked;
+        await _securityLogService.logEvent(
+          SecurityEventType.unlockSuccess,
+          'Ana parola ile kasa açıldı.',
+        );
+      }
+
       notifyListeners();
       return true;
     } catch (e) {
-      _errorMessage = 'Giriş hatası: ${e.toString().replaceAll('Exception: ', '')}';
+      await _recordFailure(
+        'Ana Parola',
+        'Giriş hatası: ${e.toString().replaceAll("Exception: ", "")}',
+      );
       notifyListeners();
       return false;
     }
   }
 
-  /// Builds an encrypted pairing payload to transfer account, Supabase config, and optionally unlocked key
-  Future<PairingPayload> buildPairingPayload({required bool includeUnlockedKey}) async {
+  Future<bool> verifyLoginMfa(String code) async {
+    _errorMessage = null;
+    if (await _checkLockoutBeforeAttempt()) {
+      return false;
+    }
+    try {
+      final cleanCode = code.replaceAll(RegExp(r'\s+'), '');
+      if (cleanCode.length != 6) {
+        _errorMessage = '6 haneli doğrulama kodunu girin.';
+        notifyListeners();
+        return false;
+      }
+      final factors = await _supabaseService.listTotpFactors();
+      if (factors.isEmpty) {
+        _status = VaultLockStatus.unlocked;
+        notifyListeners();
+        return true;
+      }
+      await _supabaseService.verifyTotpMfa(
+        factorId: factors.first.id,
+        code: cleanCode,
+      );
+      await _securityLogService.resetFailedAttempts();
+      final prefs = await SharedPreferences.getInstance();
+      await _loadSecurityPreferences(prefs);
+
+      _hasVerifiedMfa = true;
+      _status = VaultLockStatus.unlocked;
+      await _securityLogService.logEvent(
+        SecurityEventType.unlockSuccess,
+        '2FA TOTP doğrulaması ile kasa açıldı.',
+      );
+      notifyListeners();
+      return true;
+    } catch (e) {
+      await _recordFailure(
+        '2FA Doğrulama',
+        '2FA kodu geçersiz veya süresi dolmuş: $e',
+      );
+      notifyListeners();
+      return false;
+    }
+  }
+
+  void cancelMfaAndLock() {
+    CryptoService.wipe(_masterKey);
+    _masterKey = null;
+    _isDuressMode = false;
+    _status = VaultLockStatus.lockedWithPass;
+    notifyListeners();
+  }
+
+  Future<AuthMFAEnrollResponse> startTotpMfaEnrollment({
+    String friendlyName = 'MultiPad Authenticator',
+  }) async {
+    return await _supabaseService.enrollTotpMfa(friendlyName: friendlyName);
+  }
+
+  Future<bool> confirmTotpMfaEnrollment({
+    required String factorId,
+    required String code,
+  }) async {
+    _errorMessage = null;
+    try {
+      final cleanCode = code.replaceAll(RegExp(r'\s+'), '');
+      await _supabaseService.verifyTotpMfa(
+        factorId: factorId,
+        code: cleanCode,
+      );
+      await refreshMfaStatus();
+      await _securityLogService.logEvent(
+        SecurityEventType.mfaChanged,
+        'Hesap seviyesi TOTP 2FA aktifleştirildi.',
+      );
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _errorMessage = '2FA doğrulama hatası: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<bool> disableMfa(String factorId) async {
+    _errorMessage = null;
+    try {
+      await _supabaseService.unenrollMfa(factorId);
+      await refreshMfaStatus();
+      await _securityLogService.logEvent(
+        SecurityEventType.mfaChanged,
+        'Hesap seviyesi TOTP 2FA devre dışı bırakıldı.',
+        isWarning: true,
+      );
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _errorMessage = '2FA kaldırılamadı: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<List<Factor>> listAllMfaFactors() async {
+    return await _supabaseService.listAllMfaFactors();
+  }
+
+  Future<bool> signOutOtherDevices() async {
+    _errorMessage = null;
+    try {
+      await _supabaseService.signOutOtherDevices();
+      await _securityLogService.logEvent(
+        SecurityEventType.otherSessionsSignedOut,
+        'Diğer tüm cihazlardaki aktif oturumlar kapatıldı.',
+      );
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _errorMessage = 'Diğer oturumlar sonlandırılamadı: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // --- Quick PIN ---
+
+  Future<bool> enableQuickPin(String pin) async {
+    _errorMessage = null;
+    if (!isUnlocked || _masterKey == null || _isDuressMode) {
+      _errorMessage = 'Önce gerçek kasanızı açın.';
+      notifyListeners();
+      return false;
+    }
+    final cleanPin = pin.trim();
+    if (!RegExp(r'^\d{4,12}$').hasMatch(cleanPin)) {
+      _errorMessage = 'PIN 4 ile 12 arasında rakamdan oluşmalıdır.';
+      notifyListeners();
+      return false;
+    }
+
+    try {
+      final saltBytes = _cryptoService.generateRandomBytes(16);
+      final saltB64 = base64Encode(saltBytes);
+      final wrappingKey = await _cryptoService.derivePinWrappingKey(
+        cleanPin,
+        saltB64,
+      );
+      try {
+        final wrapped = await _cryptoService.encryptData(
+          base64Encode(_masterKey!),
+          wrappingKey,
+        );
+        final wrappedJson = jsonEncode(wrapped);
+        await _secureStorage.write(
+          key: AppConstants.keyQuickPinWrappedMasterKey,
+          value: wrappedJson,
+        );
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(AppConstants.keyQuickPinSalt, saltB64);
+        await prefs.setBool(AppConstants.keyQuickPinEnabled, true);
+        await prefs.setInt(AppConstants.keyQuickPinFailedAttempts, 0);
+        _isQuickPinEnabled = true;
+        notifyListeners();
+        return true;
+      } finally {
+        CryptoService.wipe(wrappingKey);
+      }
+    } catch (e) {
+      _errorMessage = 'Hızlı PIN ayarlanamadı: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<void> disableQuickPin() async {
+    await _secureStorage.delete(key: AppConstants.keyQuickPinWrappedMasterKey);
     final prefs = await SharedPreferences.getInstance();
-    final url = prefs.getString(AppConstants.keySupabaseUrl) ?? AppConstants.defaultSupabaseUrl;
-    final anonKey = prefs.getString(AppConstants.keySupabaseAnonKey) ?? AppConstants.defaultSupabaseAnonKey;
+    await prefs.setBool(AppConstants.keyQuickPinEnabled, false);
+    await prefs.remove(AppConstants.keyQuickPinSalt);
+    await prefs.setInt(AppConstants.keyQuickPinFailedAttempts, 0);
+    _isQuickPinEnabled = false;
+    notifyListeners();
+  }
+
+  Future<bool> unlockWithQuickPin(String pin) async {
+    _errorMessage = null;
+    if (await _checkLockoutBeforeAttempt()) {
+      return false;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final saltB64 = prefs.getString(AppConstants.keyQuickPinSalt);
+    final wrappedJson = await _secureStorage.read(
+      key: AppConstants.keyQuickPinWrappedMasterKey,
+    );
+    if (!_isQuickPinEnabled ||
+        saltB64 == null ||
+        wrappedJson == null ||
+        wrappedJson.isEmpty) {
+      await disableQuickPin();
+      _errorMessage = 'Hızlı PIN kullanılamıyor; ana parolanızı girin.';
+      notifyListeners();
+      return false;
+    }
+
+    List<int>? wrappingKey;
+    try {
+      wrappingKey = await _cryptoService.derivePinWrappingKey(
+        pin.trim(),
+        saltB64,
+      );
+      final wrapped = jsonDecode(wrappedJson) as Map<String, dynamic>;
+      final masterB64 = await _cryptoService.decryptData(
+        ciphertextBase64: wrapped['ciphertext'] as String,
+        ivBase64: wrapped['iv'] as String,
+        macBase64: wrapped['mac'] as String,
+        masterKey: wrappingKey,
+      );
+      final unlockedKey = base64Decode(masterB64);
+
+      await prefs.setInt(AppConstants.keyQuickPinFailedAttempts, 0);
+      await _securityLogService.resetFailedAttempts();
+      await _loadSecurityPreferences(prefs);
+
+      _masterKey = unlockedKey;
+      _isDuressMode = false;
+
+      if (SupabaseService.isInitialized &&
+          SupabaseService.currentUser == null &&
+          _currentUserEmail != null &&
+          _currentUserEmail!.isNotEmpty) {
+        try {
+          final authPass = _cryptoService.deriveAuthPassword(unlockedKey);
+          await _supabaseService.signIn(
+            email: _currentUserEmail!,
+            authPassword: authPass,
+          );
+        } catch (e) {
+          debugPrint('Quick PIN silent Supabase reconnect warning: $e');
+        }
+      }
+
+      if (SupabaseService.isInitialized &&
+          _supabaseService.requiresMfaVerification()) {
+        _status = VaultLockStatus.mfaRequired;
+      } else {
+        _status = VaultLockStatus.unlocked;
+        await _securityLogService.logEvent(
+          SecurityEventType.pinUnlockSuccess,
+          'Hızlı PIN ile kasa açıldı.',
+        );
+      }
+
+      notifyListeners();
+      return true;
+    } catch (_) {
+      final pinFails =
+          (prefs.getInt(AppConstants.keyQuickPinFailedAttempts) ?? 0) + 1;
+      await prefs.setInt(AppConstants.keyQuickPinFailedAttempts, pinFails);
+      await _recordFailure('Hızlı PIN', 'Hatalı PIN kodu.');
+      if (pinFails >= 3) {
+        await disableQuickPin();
+        _errorMessage =
+            '3 kez hatalı PIN girildi. Güvenlik için Hızlı PIN devre dışı bırakıldı; ana parolanızı girin.';
+      }
+      notifyListeners();
+      return false;
+    } finally {
+      CryptoService.wipe(wrappingKey);
+    }
+  }
+
+  // --- Duress / Panic Password ---
+
+  Future<bool> configureDuressPassword(String duressPassword) async {
+    _errorMessage = null;
+    if (!isUnlocked || _masterKey == null || _isDuressMode) {
+      _errorMessage = 'Bu işlem için gerçek kasanızın kilidi açık olmalıdır.';
+      notifyListeners();
+      return false;
+    }
+    if (duressPassword.length < 6) {
+      _errorMessage = 'Panik parolası en az 6 karakter olmalıdır.';
+      notifyListeners();
+      return false;
+    }
+
+    try {
+      // Ensure duress password doesn't match the real master password
+      if (_currentSalt != null && _currentSalt!.isNotEmpty) {
+        final testReal = await _cryptoService.deriveMasterKey(
+          duressPassword,
+          _currentSalt!,
+        );
+        final isSame = CryptoService.constantTimeEquals(testReal, _masterKey!);
+        CryptoService.wipe(testReal);
+        if (isSame) {
+          _errorMessage =
+              'Panik parolası gerçek ana parolanızla aynı olamaz.';
+          notifyListeners();
+          return false;
+        }
+      }
+
+      final duressSalt = _cryptoService.generateSalt(useArgon2id: true);
+      final duressKey = await _cryptoService.deriveMasterKey(
+        duressPassword,
+        duressSalt,
+      );
+      final verifier = _cryptoService.deriveDuressVerifier(duressKey);
+      CryptoService.wipe(duressKey);
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(AppConstants.keyDuressSalt, duressSalt);
+      await prefs.setString(AppConstants.keyDuressVerifier, verifier);
+      await prefs.setBool(AppConstants.keyDuressEnabled, true);
+      await prefs.remove(AppConstants.keyDuressEncryptedItems);
+
+      _isDuressEnabled = true;
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _errorMessage = 'Panik parolası kaydedilemedi: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<void> disableDuressPassword() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConstants.keyDuressEnabled, false);
+    await prefs.remove(AppConstants.keyDuressSalt);
+    await prefs.remove(AppConstants.keyDuressVerifier);
+    await prefs.remove(AppConstants.keyDuressEncryptedItems);
+    _isDuressEnabled = false;
+    notifyListeners();
+  }
+
+  // --- Pairing ---
+
+  Future<PairingPayload> buildPairingPayload({
+    required bool includeUnlockedKey,
+  }) async {
+    if (_isDuressMode) {
+      throw Exception('Mevcut modda cihaz eşleştirme yapılamaz.');
+    }
+    final prefs = await SharedPreferences.getInstance();
     final salt = prefs.getString(AppConstants.keyMasterSalt) ?? '';
-    final email = _currentUserEmail ?? prefs.getString(AppConstants.keyCachedEmail) ?? '';
+    final email = _currentUserEmail ??
+        prefs.getString(AppConstants.keyCachedEmail) ??
+        '';
     final localItems = await OfflineStorageService.loadLocalItems();
 
     return PairingPayload(
-      supabaseUrl: url,
-      supabaseAnonKey: anonKey,
+      supabaseUrl: prefs.getString(AppConstants.keySupabaseUrl) ??
+          AppConstants.defaultSupabaseUrl,
+      supabaseAnonKey: prefs.getString(AppConstants.keySupabaseAnonKey) ??
+          AppConstants.defaultSupabaseAnonKey,
       email: email,
       masterSalt: salt,
-      masterKeyBase64: (includeUnlockedKey && _masterKey != null) ? base64Encode(_masterKey!) : null,
+      masterKeyBase64: (includeUnlockedKey && _masterKey != null)
+          ? base64Encode(_masterKey!)
+          : null,
       offlineItems: localItems,
     );
   }
 
-  /// Completes setup on a newly paired device (configures Supabase, signs in automatically, syncs items)
   Future<bool> completePairingSetup(PairingPayload payload) async {
     _errorMessage = null;
     try {
       final prefs = await SharedPreferences.getInstance();
       final cleanEmail = payload.email.trim().toLowerCase();
+      final prevSalt = prefs.getString(AppConstants.keyMasterSalt);
 
       if (payload.masterSalt.isNotEmpty) {
+        if (prevSalt != null &&
+            prevSalt.isNotEmpty &&
+            prevSalt != payload.masterSalt) {
+          await OfflineStorageService.clearLocal();
+          await NativeBridgeService.clearAutofillIndex();
+        }
         await prefs.setString(AppConstants.keyMasterSalt, payload.masterSalt);
+        _currentSalt = payload.masterSalt;
       }
       if (cleanEmail.isNotEmpty) {
         await prefs.setString(AppConstants.keyCachedEmail, cleanEmail);
         _currentUserEmail = cleanEmail;
       }
 
-      // 1. Configure & initialize Supabase automatically
-      if (payload.supabaseUrl.trim().isNotEmpty && payload.supabaseAnonKey.trim().isNotEmpty) {
+      if (payload.supabaseUrl.trim().isNotEmpty &&
+          payload.supabaseAnonKey.trim().isNotEmpty) {
         await SupabaseService.initialize(
           customUrl: payload.supabaseUrl.trim(),
           customAnonKey: payload.supabaseAnonKey.trim(),
         );
       }
 
-      // 2. Import encrypted offline items locally
       for (final rawItem in payload.offlineItems) {
-        await OfflineStorageService.upsertLocalItem(rawItem);
+        await OfflineStorageService.upsertLocalItem(
+          rawItem,
+          dirty: rawItem['dirty'] == true || rawItem['dirty'] == 1,
+          baseHash: rawItem['base_hash']?.toString(),
+        );
       }
 
-      _canUseBiometrics = await _biometricService.canCheckBiometrics();
+      await _securityLogService.resetFailedAttempts();
+      await _loadSecurityPreferences(prefs);
 
-      // 3. If unlocked masterKey was transferred, auto-sign into Supabase & unlock vault directly!
-      if (payload.masterKeyBase64 != null && payload.masterKeyBase64!.isNotEmpty) {
+      if (payload.masterKeyBase64 != null &&
+          payload.masterKeyBase64!.isNotEmpty) {
         final receivedKey = base64Decode(payload.masterKeyBase64!);
+        CryptoService.wipe(_masterKey);
+        _masterKey = receivedKey;
+        _isDuressMode = false;
 
         if (SupabaseService.isInitialized && cleanEmail.isNotEmpty) {
           final authPassword = _cryptoService.deriveAuthPassword(receivedKey);
@@ -317,13 +970,22 @@ class AuthProvider with ChangeNotifier {
               authPassword: authPassword,
             );
           } catch (signInErr) {
-            debugPrint('Pairing auto sign-in warning (continuing with local vault): $signInErr');
+            debugPrint(
+              'Pairing auto sign-in warning (continuing with local vault): $signInErr',
+            );
           }
         }
 
-        CryptoService.wipe(_masterKey);
-        _masterKey = receivedKey;
-        _status = VaultLockStatus.unlocked;
+        if (SupabaseService.isInitialized &&
+            _supabaseService.requiresMfaVerification()) {
+          _status = VaultLockStatus.mfaRequired;
+        } else {
+          _status = VaultLockStatus.unlocked;
+          await _securityLogService.logEvent(
+            SecurityEventType.unlockSuccess,
+            'Cihaz eşleştirme ile oturum ve kasa açıldı.',
+          );
+        }
       } else {
         _status = VaultLockStatus.lockedWithPass;
       }
@@ -331,54 +993,65 @@ class AuthProvider with ChangeNotifier {
       notifyListeners();
       return true;
     } catch (e) {
-      _errorMessage = 'Cihaz eşleştirme uygulanırken hata oluştu: $e';
+      _errorMessage = 'Eşleştirme uygulama hatası: $e';
       notifyListeners();
       return false;
     }
   }
 
-  /// Atomically change the master password and re-encrypt the entire vault
+  // --- Password Change & Argon2id Upgrade ---
+
   Future<bool> changeMasterPassword({
     required String currentPassword,
     required String newPassword,
-    required VaultProvider vault,
+    required Future<void> Function(List<int> newMasterKey) onReEncryptVault,
+    bool forceArgon2id = false,
   }) async {
     _errorMessage = null;
-    if (_masterKey == null) {
-      _errorMessage = 'Kasa açık değil.';
+    if (!isUnlocked || _masterKey == null || _isDuressMode) {
+      _errorMessage = 'Kasa kilidi açık değil.';
       notifyListeners();
       return false;
     }
 
     final prefs = await SharedPreferences.getInstance();
     final currentSalt = prefs.getString(AppConstants.keyMasterSalt);
-    if (currentSalt == null) {
-      _errorMessage = 'Mevcut kasa tuzu bulunamadı.';
+    if (currentSalt == null || currentSalt.isEmpty) {
+      _errorMessage = 'Mevcut şifre tuzu bulunamadı.';
       notifyListeners();
       return false;
     }
 
-    // 1. Verify current password
-    final testCurrentKey = await _cryptoService.deriveMasterKey(currentPassword, currentSalt);
-    final isCurrentMatch = CryptoService.constantTimeEquals(testCurrentKey, _masterKey!);
-    CryptoService.wipe(testCurrentKey);
-
-    if (!isCurrentMatch) {
-      _errorMessage = 'Mevcut ana şifre hatalı!';
+    final derivedCheck = await _cryptoService.deriveMasterKey(
+      currentPassword,
+      currentSalt,
+    );
+    final matches = CryptoService.constantTimeEquals(derivedCheck, _masterKey!);
+    CryptoService.wipe(derivedCheck);
+    if (!matches) {
+      _errorMessage = 'Mevcut ana parolanız yanlış.';
       notifyListeners();
       return false;
     }
 
-    // 2. Derive new keys with fresh random salt
-    final newSalt = _cryptoService.generateSalt();
-    final newMasterKey = await _cryptoService.deriveMasterKey(newPassword, newSalt);
+    if (newPassword.length < 8) {
+      _errorMessage = 'Yeni ana parola en az 8 karakter olmalıdır.';
+      notifyListeners();
+      return false;
+    }
+
+    final useArgon =
+        forceArgon2id || _preferArgon2id || CryptoService.isArgon2idSalt(currentSalt);
+    final newSalt = _cryptoService.generateSalt(useArgon2id: useArgon);
+    final newMasterKey = await _cryptoService.deriveMasterKey(
+      newPassword,
+      newSalt,
+    );
     final newAuthPassword = _cryptoService.deriveAuthPassword(newMasterKey);
 
     try {
-      // 3. Re-encrypt all vault items in memory and storage
-      await vault.reEncryptAllWithNewKey(newMasterKey);
+      await onReEncryptVault(newMasterKey);
 
-      // 4. Update Supabase if connected
       if (SupabaseService.isInitialized && SupabaseService.currentUser != null) {
         await _supabaseService.updateMasterSaltAndAuthPassword(
           newMasterSalt: newSalt,
@@ -386,99 +1059,177 @@ class AuthProvider with ChangeNotifier {
         );
       }
 
-      // 5. Update local salt
-      await prefs.setString(AppConstants.keyMasterSalt, newSalt);
-
-      // 6. Update Hardware Biometrics if enabled
       if (_isBiometricEnabled) {
-        try {
-          await _biometricService.enableBiometrics(newMasterKey);
-        } catch (e) {
-          debugPrint('Biometric key rotation warning: $e');
-        }
+        await _biometricService.enableBiometrics(newMasterKey);
       }
 
-      // 7. Update in-memory master key and wipe old key
+      // If Quick PIN is enabled, user should re-enroll or keep synced?
+      // We can't recover the PIN without prompting, so safely disable or warn;
+      // Wait: if Quick PIN was wrapping the OLD masterKey, decrypting with OLD key won't work anyway without PIN!
+      if (_isQuickPinEnabled) {
+        await disableQuickPin();
+      }
+
       CryptoService.wipe(_masterKey);
       _masterKey = newMasterKey;
+      _currentSalt = newSalt;
+      await prefs.setString(AppConstants.keyMasterSalt, newSalt);
+
+      await _securityLogService.logEvent(
+        forceArgon2id
+            ? SecurityEventType.kdfUpgradedToArgon2id
+            : SecurityEventType.masterPasswordChanged,
+        forceArgon2id
+            ? 'Anahtar türetme Argon2id algoritmasına yükseltildi ve kasa yeniden şifrelendi.'
+            : 'Ana parola değiştirildi ve tüm kasa yeniden şifrelendi.',
+      );
+
       notifyListeners();
       return true;
     } catch (e) {
       CryptoService.wipe(newMasterKey);
-      _errorMessage = 'Şifre güncelleme hatası: $e';
+      _errorMessage = 'Şifre değiştirme hatası: $e';
       notifyListeners();
       return false;
     }
   }
 
-  /// Unlock using Touch ID / Fingerprint / Windows Hello
+  Future<bool> upgradeToArgon2id({
+    required String currentPassword,
+    required Future<void> Function(List<int> newMasterKey) onReEncryptVault,
+  }) async {
+    await setPreferArgon2id(true);
+    return changeMasterPassword(
+      currentPassword: currentPassword,
+      newPassword: currentPassword,
+      onReEncryptVault: onReEncryptVault,
+      forceArgon2id: true,
+    );
+  }
+
+  // --- Biometrics ---
+
   Future<bool> unlockWithBiometrics() async {
     _errorMessage = null;
-    try {
-      final key = await _biometricService.retrieveBiometricMasterKey();
-      if (key != null) {
-        _masterKey = key;
-        _status = VaultLockStatus.unlocked;
-        notifyListeners();
-        return true;
-      }
+    if (await _checkLockoutBeforeAttempt()) {
       return false;
-    } catch (e) {
-      _errorMessage = 'Biyometrik kilit açma başarısız: $e';
+    }
+    if (_biometricDisabledDueToFailures) {
+      _errorMessage =
+          'Üst üste hatalı denemeler nedeniyle biyometrik kilit geçici olarak devre dışı. Ana parolanızı girin.';
       notifyListeners();
       return false;
     }
-  }
 
-  /// Toggle Biometrics
-  Future<bool> toggleBiometrics(bool enable) async {
-    _errorMessage = null;
-    if (_masterKey == null) return false;
     try {
-      if (enable) {
-        final authenticated = await _biometricService.authenticate(
-          reason: 'Parmak İzi / Touch ID ile girişi aktifleştirmek için doğrulayın',
-        );
-        if (authenticated) {
-          await _biometricService.enableBiometrics(_masterKey!);
-          _isBiometricEnabled = true;
-          notifyListeners();
-          return true;
+      final retrievedKey = await runWithoutAutoLock(
+        () => _biometricService.retrieveBiometricMasterKey(),
+      );
+      if (retrievedKey != null) {
+        await _securityLogService.resetFailedAttempts();
+        final prefs = await SharedPreferences.getInstance();
+        await _loadSecurityPreferences(prefs);
+
+        _masterKey = retrievedKey;
+        _isDuressMode = false;
+
+        if (SupabaseService.isInitialized &&
+            SupabaseService.currentUser == null &&
+            _currentUserEmail != null &&
+            _currentUserEmail!.isNotEmpty) {
+          try {
+            final authPass = _cryptoService.deriveAuthPassword(retrievedKey);
+            await _supabaseService.signIn(
+              email: _currentUserEmail!,
+              authPassword: authPass,
+            );
+          } catch (e) {
+            debugPrint('Biometric silent Supabase reconnect warning: $e');
+          }
         }
-        return false;
-      } else {
-        await _biometricService.disableBiometrics();
-        _isBiometricEnabled = false;
+
+        if (SupabaseService.isInitialized &&
+            _supabaseService.requiresMfaVerification()) {
+          _status = VaultLockStatus.mfaRequired;
+        } else {
+          _status = VaultLockStatus.unlocked;
+          await _securityLogService.logEvent(
+            SecurityEventType.biometricSuccess,
+            'Biyometrik doğrulama ile kasa açıldı.',
+          );
+        }
         notifyListeners();
         return true;
       }
+      _errorMessage = 'Biyometrik doğrulama başarısız veya iptal edildi.';
+      notifyListeners();
+      return false;
     } catch (e) {
-      _errorMessage = 'Biyometrik ayar değiştirilemedi: $e';
+      _errorMessage = 'Biyometrik kilit açılamadı.';
       notifyListeners();
       return false;
     }
   }
 
-  /// Lock Vault (wipes master encryption key from RAM immediately)
-  void lockVault() {
-    if (_masterKey != null) {
-      CryptoService.wipe(_masterKey);
-      _masterKey = null;
+  Future<bool> toggleBiometrics(bool enable) async {
+    if (_isDuressMode) {
+      _errorMessage = 'Bu işlem mevcut modda kullanılamaz.';
+      notifyListeners();
+      return false;
     }
+    if (enable) {
+      if (_masterKey == null) return false;
+      final authenticated = await runWithoutAutoLock(
+        () => _biometricService.authenticate(
+          reason: 'Biyometrik kilit açmayı aktifleştirmek için onaylayın',
+        ),
+      );
+      if (authenticated) {
+        await _biometricService.enableBiometrics(_masterKey!);
+        _isBiometricEnabled = true;
+        notifyListeners();
+        return true;
+      }
+      return false;
+    } else {
+      await _biometricService.disableBiometrics();
+      _isBiometricEnabled = false;
+      notifyListeners();
+      return true;
+    }
+  }
+
+  void lockVault({String reason = 'Kullanıcı veya otomatik zamanlayıcı tarafından kilitlendi.'}) {
+    if (_status != VaultLockStatus.unlocked && _status != VaultLockStatus.mfaRequired) {
+      return;
+    }
+    CryptoService.wipe(_masterKey);
+    _masterKey = null;
+    _isDuressMode = false;
     _status = VaultLockStatus.lockedWithPass;
+    _securityLogService.logEvent(SecurityEventType.vaultLocked, reason);
     notifyListeners();
   }
 
-  /// Logout completely
   Future<void> logout() async {
-    lockVault();
+    CryptoService.wipe(_masterKey);
+    _masterKey = null;
+    _isDuressMode = false;
     await _biometricService.disableBiometrics();
+    await disableQuickPin();
+    await disableDuressPassword();
     _isBiometricEnabled = false;
+    await _supabaseService.signOut();
+    await OfflineStorageService.clearLocal();
+    await NativeBridgeService.clearAutofillIndex();
 
-    if (SupabaseService.isInitialized) {
-      await _supabaseService.signOut();
-    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(AppConstants.keyMasterSalt);
+    await prefs.remove(AppConstants.keyCachedEmail);
     _currentUserEmail = null;
+    _currentSalt = null;
+    _hasVerifiedMfa = false;
+
     _status = VaultLockStatus.lockedWithPass;
     notifyListeners();
   }

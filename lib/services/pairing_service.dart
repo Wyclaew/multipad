@@ -48,10 +48,23 @@ class PairingPayload {
   }
 }
 
+class ParsedQrPairing {
+  final List<String> ips;
+  final int port;
+  final String pin;
+
+  ParsedQrPairing({
+    required this.ips,
+    required this.port,
+    required this.pin,
+  });
+}
+
 class DiscoveredPairingDevice {
   final String sessionId;
   final String deviceName;
   final String ip;
+  final List<String> allIps;
   final int port;
   final DateTime lastSeen;
 
@@ -59,9 +72,10 @@ class DiscoveredPairingDevice {
     required this.sessionId,
     required this.deviceName,
     required this.ip,
+    List<String>? allIps,
     required this.port,
     required this.lastSeen,
-  });
+  }) : allIps = allIps ?? [ip];
 }
 
 enum PairingHostStatus {
@@ -85,6 +99,13 @@ class PairingHostSession {
   RawDatagramSocket? _udpSocket;
   Timer? _beaconTimer;
   Timer? _expiryTimer;
+  DateTime? _expiresAt;
+
+  int get remainingSeconds {
+    if (_closed || _completed || _expiresAt == null) return 0;
+    final secs = _expiresAt!.difference(DateTime.now()).inSeconds;
+    return secs < 0 ? 0 : secs;
+  }
 
   final X25519 _x25519 = X25519();
   final Hkdf _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
@@ -109,13 +130,19 @@ class PairingHostSession {
         _cryptoService = cryptoService,
         sessionId = const Uuid().v4();
 
+  String buildQrPairingUri() {
+    final ipsParam = Uri.encodeComponent(localIps.join(','));
+    return 'MPPAIR:v1:$ipsParam:${serverPort ?? 0}:$pin';
+  }
+
   Future<void> start() async {
     _ephemeralKeyPair = await _x25519.newKeyPair();
     final pubKey = await _ephemeralKeyPair!.extractPublicKey();
     _senderPubKeyBase64 = base64Encode(pubKey.bytes);
 
     final rand = Random.secure();
-    _pairingSaltBytes = Uint8List.fromList(List<int>.generate(16, (_) => rand.nextInt(256)));
+    _pairingSaltBytes =
+        Uint8List.fromList(List<int>.generate(16, (_) => rand.nextInt(256)));
 
     localIps = await _getLocalIPv4Addresses();
     _server = await HttpServer.bind(InternetAddress.anyIPv4, 0);
@@ -124,9 +151,13 @@ class PairingHostSession {
     _server!.listen(_handleRequest);
 
     // Expire automatically after 5 minutes for security
+    _expiresAt = DateTime.now().add(const Duration(minutes: 5));
     _expiryTimer = Timer(const Duration(minutes: 5), () {
       if (!_completed && !_closed) {
-        onStatusChanged(PairingHostStatus.expired, 'Eşleştirme kodunun süresi doldu (5 dk).');
+        onStatusChanged(
+          PairingHostStatus.expired,
+          'Eşleştirme kodunun süresi doldu (5 dk).',
+        );
         stop();
       }
     });
@@ -136,7 +167,10 @@ class PairingHostSession {
       _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       _udpSocket!.broadcastEnabled = true;
       _sendBeacon();
-      _beaconTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) => _sendBeacon());
+      _beaconTimer = Timer.periodic(
+        const Duration(milliseconds: 1500),
+        (_) => _sendBeacon(),
+      );
     } catch (e) {
       debugPrint('UDP discovery broadcast unavailable: $e');
     }
@@ -154,14 +188,29 @@ class PairingHostSession {
         'port': serverPort,
       });
       final data = utf8.encode(msg);
-      _udpSocket!.send(data, InternetAddress('255.255.255.255'), discoveryUdpPort);
 
-      // Also broadcast to subnet .255 for macOS Wi-Fi compatibility
+      try {
+        _udpSocket!.send(
+          data,
+          InternetAddress('255.255.255.255'),
+          discoveryUdpPort,
+        );
+      } catch (_) {
+        // macOS often rejects 255.255.255.255 on certain interfaces; subnet .255 below handles it.
+      }
+
+      // Also broadcast to subnet .255 for macOS/Linux/Android Wi-Fi compatibility
       for (final ip in localIps) {
         final parts = ip.split('.');
         if (parts.length == 4) {
           final subnetBroadcast = '${parts[0]}.${parts[1]}.${parts[2]}.255';
-          _udpSocket!.send(data, InternetAddress(subnetBroadcast), discoveryUdpPort);
+          try {
+            _udpSocket!.send(
+              data,
+              InternetAddress(subnetBroadcast),
+              discoveryUdpPort,
+            );
+          } catch (_) {}
         }
       }
     } catch (e) {
@@ -170,10 +219,12 @@ class PairingHostSession {
   }
 
   Future<void> _handleRequest(HttpRequest request) async {
+    var responseClosed = false;
     try {
       if (_closed || _completed || _failedAttempts >= 3) {
         request.response.statusCode = HttpStatus.gone;
         await request.response.close();
+        responseClosed = true;
         return;
       }
 
@@ -186,6 +237,7 @@ class PairingHostSession {
           'salt': base64Encode(_pairingSaltBytes!),
         }));
         await request.response.close();
+        responseClosed = true;
         return;
       }
 
@@ -198,6 +250,7 @@ class PairingHostSession {
         if (receiverPubKeyBase64 == null || proofBase64 == null) {
           request.response.statusCode = HttpStatus.badRequest;
           await request.response.close();
+          responseClosed = true;
           return;
         }
 
@@ -217,7 +270,8 @@ class PairingHostSession {
             nonce: _pairingSaltBytes!,
             info: utf8.encode('multipad_lan_pair_v1:$pin'),
           );
-          sessionKeyBytes = await derivedKey.extractBytes();
+          // Copy into mutable list so CryptoService.wipe never throws UnsupportedError
+          sessionKeyBytes = Uint8List.fromList(await derivedKey.extractBytes());
 
           final expectedProof = crypto_pkg.Hmac(crypto_pkg.sha256, sessionKeyBytes)
               .convert(utf8.encode('multipad_pair_verify'))
@@ -229,8 +283,11 @@ class PairingHostSession {
             final left = 3 - _failedAttempts;
             request.response.statusCode = HttpStatus.forbidden;
             request.response.headers.contentType = ContentType.json;
-            request.response.write(jsonEncode({'error': 'Invalid PIN', 'attemptsLeft': left}));
+            request.response.write(
+              jsonEncode({'error': 'Invalid PIN', 'attemptsLeft': left}),
+            );
             await request.response.close();
+            responseClosed = true;
 
             if (_failedAttempts >= 3) {
               onStatusChanged(
@@ -261,13 +318,15 @@ class PairingHostSession {
             'iv': encrypted.iv,
             'mac': encrypted.mac,
           }));
+          await request.response.flush();
           await request.response.close();
+          responseClosed = true;
 
           onStatusChanged(
             PairingHostStatus.paired,
             'Cihaz eşleştirildi! Kurulum ve kasa verileri şifreli tünelden aktarıldı.',
           );
-          Timer(const Duration(milliseconds: 400), () => stop());
+          Timer(const Duration(milliseconds: 4000), () => stop(force: false));
           return;
         } finally {
           CryptoService.wipe(sessionKeyBytes);
@@ -276,16 +335,19 @@ class PairingHostSession {
 
       request.response.statusCode = HttpStatus.notFound;
       await request.response.close();
+      responseClosed = true;
     } catch (e) {
       debugPrint('Pairing host request error: $e');
-      try {
-        request.response.statusCode = HttpStatus.internalServerError;
-        await request.response.close();
-      } catch (_) {}
+      if (!responseClosed) {
+        try {
+          request.response.statusCode = HttpStatus.internalServerError;
+          await request.response.close();
+        } catch (_) {}
+      }
     }
   }
 
-  Future<void> stop() async {
+  Future<void> stop({bool force = true}) async {
     if (_closed) return;
     _closed = true;
     _beaconTimer?.cancel();
@@ -293,7 +355,7 @@ class PairingHostSession {
     _udpSocket?.close();
     _udpSocket = null;
     try {
-      await _server?.close(force: true);
+      await _server?.close(force: force);
     } catch (_) {}
     _server = null;
     CryptoService.wipe(_pairingSaltBytes);
@@ -373,6 +435,93 @@ class PairingService {
     return session;
   }
 
+  static ParsedQrPairing? parseQrPairingUri(String raw) {
+    final trimmed = raw.trim();
+    if (!trimmed.startsWith('MPPAIR:v1:')) return null;
+    final parts = trimmed.split(':');
+    if (parts.length != 5) return null;
+    final ipsRaw = Uri.decodeComponent(parts[2]);
+    final ips = ipsRaw
+        .split(',')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    final port = int.tryParse(parts[3]);
+    final pin = parts[4].trim();
+    if (ips.isEmpty || port == null || port <= 0 || pin.length != 6) {
+      return null;
+    }
+    return ParsedQrPairing(ips: ips, port: port, pin: pin);
+  }
+
+  /// Tries multiple candidate host IPs (e.g. from QR or multi-NIC host) in order.
+  /// Immediately aborts on Wrong PIN or closed/expired session rather than retrying other IPs.
+  Future<PairingPayload> connectAndPairAny({
+    required List<String> hostIps,
+    required int port,
+    required String pin,
+  }) async {
+    final uniqueIps = <String>[];
+    for (final ip in hostIps) {
+      final clean = ip.trim();
+      if (clean.isNotEmpty && !uniqueIps.contains(clean)) {
+        uniqueIps.add(clean);
+      }
+    }
+    if (uniqueIps.isEmpty) {
+      throw Exception('Geçerli bir IP adresi bulunamadı.');
+    }
+
+    if (uniqueIps.length > 1) {
+      final results = await Future.wait(
+        uniqueIps.map((ip) async {
+          try {
+            final socket = await Socket.connect(
+              ip,
+              port,
+              timeout: const Duration(milliseconds: 1500),
+            );
+            socket.destroy();
+            return true;
+          } catch (_) {
+            return false;
+          }
+        }),
+      );
+      final reachable = <String>[];
+      final unreachable = <String>[];
+      for (var i = 0; i < uniqueIps.length; i++) {
+        if (results[i]) {
+          reachable.add(uniqueIps[i]);
+        } else {
+          unreachable.add(uniqueIps[i]);
+        }
+      }
+      uniqueIps
+        ..clear()
+        ..addAll(reachable)
+        ..addAll(unreachable);
+    }
+
+    Object? lastError;
+    for (final ip in uniqueIps) {
+      try {
+        return await connectAndPair(hostIp: ip, port: port, pin: pin);
+      } catch (e) {
+        final msg = e.toString();
+        // Do not retry different NICs on authentication/lockout errors
+        if (msg.contains('PIN kodu hatalı') ||
+            msg.contains('Oturum güvenlik nedeniyle kapatıldı') ||
+            msg.contains('süresi doldu') ||
+            msg.contains('6 haneli')) {
+          rethrow;
+        }
+        lastError = e;
+      }
+    }
+    throw lastError ?? Exception('Hiçbir IP adresi üzerinden bağlantı kurulamadı.');
+  }
+
   /// Connects to a discovered or manually typed LAN host and completes X25519 + PIN key exchange
   Future<PairingPayload> connectAndPair({
     required String hostIp,
@@ -384,7 +533,9 @@ class PairingService {
       throw Exception('Lütfen 6 haneli eşleştirme PIN kodunu girin.');
     }
 
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 6)
+      ..findProxy = (_) => 'DIRECT';
     List<int>? sessionKeyBytes;
 
     try {
@@ -425,7 +576,8 @@ class PairingService {
         nonce: saltBytes,
         info: utf8.encode('multipad_lan_pair_v1:$cleanPin'),
       );
-      sessionKeyBytes = await derivedKey.extractBytes();
+      // Copy into mutable list so CryptoService.wipe never throws UnsupportedError
+      sessionKeyBytes = Uint8List.fromList(await derivedKey.extractBytes());
 
       final proof = crypto_pkg.Hmac(crypto_pkg.sha256, sessionKeyBytes)
           .convert(utf8.encode('multipad_pair_verify'))
@@ -488,16 +640,26 @@ class PairingService {
             final msg = utf8.decode(datagram.data);
             final data = jsonDecode(msg) as Map<String, dynamic>;
             if (data['app'] == 'MultiPad' && data['port'] != null) {
-              final ips = (data['ips'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [];
+              final ips = (data['ips'] as List<dynamic>?)
+                      ?.map((e) => e.toString())
+                      .where((e) => e.isNotEmpty)
+                      .toList() ??
+                  [];
               final senderIp = datagram.address.address;
-              final preferredIp = (senderIp.isNotEmpty && !senderIp.startsWith('0.'))
-                  ? senderIp
-                  : (ips.isNotEmpty ? ips.first : senderIp);
+              final preferredIp =
+                  (senderIp.isNotEmpty && !senderIp.startsWith('0.'))
+                      ? senderIp
+                      : (ips.isNotEmpty ? ips.first : senderIp);
+              final combinedIps = <String>[
+                if (preferredIp.isNotEmpty) preferredIp,
+                ...ips.where((ip) => ip != preferredIp),
+              ];
 
               onDeviceFound(DiscoveredPairingDevice(
                 sessionId: data['id'] as String? ?? preferredIp,
                 deviceName: data['device'] as String? ?? 'MultiPad Cihazı',
                 ip: preferredIp,
+                allIps: combinedIps,
                 port: data['port'] as int,
                 lastSeen: DateTime.now(),
               ));
@@ -522,13 +684,13 @@ class PairingService {
       throw Exception('Aktarım şifresi / PIN en az 6 karakter olmalıdır.');
     }
 
-    final salt = _cryptoService.generateSalt();
+    final salt = _cryptoService.generateArgon2idSalt();
     List<int>? key;
     try {
       key = await _cryptoService.deriveMasterKey(cleanPass, salt);
       final encrypted = await _cryptoService.encryptData(payload.toJsonString(), key);
       final wrapper = jsonEncode({
-        'v': 1,
+        'v': 2,
         's': salt,
         'iv': encrypted.iv,
         'mac': encrypted.mac,

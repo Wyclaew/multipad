@@ -1,5 +1,8 @@
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../l10n/app_localizations.dart';
+import '../providers/settings_provider.dart';
 import '../services/clipboard_service.dart';
 
 enum GeneratorMode {
@@ -24,8 +27,8 @@ class _PasswordGeneratorDialogState extends State<PasswordGeneratorDialog> {
   bool _includeNumbers = true;
   bool _includeSymbols = true;
   bool _avoidAmbiguous = true; // Excludes 0, O, l, 1, I
-  int _minNumbers = 2;
-  int _minSymbols = 2;
+  final int _minNumbers = 2;
+  final int _minSymbols = 2;
 
   // Passphrase options
   int _wordCount = 5;
@@ -195,7 +198,12 @@ class _PasswordGeneratorDialogState extends State<PasswordGeneratorDialog> {
         children: [
           Icon(Icons.shield_outlined, color: Colors.blueAccent),
           SizedBox(width: 8),
-          Text('Güvenli Şifre Motoru', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          Expanded(
+            child: Text(
+              'Güvenli Şifre Motoru',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+          ),
         ],
       ),
       content: SizedBox(
@@ -225,9 +233,9 @@ class _PasswordGeneratorDialogState extends State<PasswordGeneratorDialog> {
               Container(
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.5),
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: color.withOpacity(0.6), width: 1.5),
+                  border: Border.all(color: color.withValues(alpha: 0.6), width: 1.5),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -250,11 +258,17 @@ class _PasswordGeneratorDialogState extends State<PasswordGeneratorDialog> {
                           decoration: BoxDecoration(shape: BoxShape.circle, color: color),
                         ),
                         const SizedBox(width: 6),
-                        Text(
-                          '$level (${_entropyBits.toStringAsFixed(1)} bit entropi)',
-                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: color),
+                        Expanded(
+                          child: Text(
+                            '$level (${_entropyBits.toStringAsFixed(1)} bit entropi)',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: color,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
-                        const Spacer(),
                         IconButton(
                           icon: const Icon(Icons.refresh_rounded, size: 20),
                           tooltip: 'Yeniden Üret',
@@ -424,13 +438,29 @@ class _PasswordGeneratorDialogState extends State<PasswordGeneratorDialog> {
         ),
         OutlinedButton.icon(
           icon: const Icon(Icons.copy, size: 16),
-          label: const Text('Kopyala'),
+          label: Text(context.l10n.copy),
           onPressed: () async {
             if (_generated.isNotEmpty) {
-              await ClipboardService.copySecurely(_generated);
+              int timeout = ClipboardService.defaultTimeoutSeconds;
+              try {
+                timeout =
+                    context.read<SettingsProvider>().clipboardTimeoutSeconds;
+              } catch (_) {}
+              await ClipboardService.copySecurely(
+                _generated,
+                timeoutSeconds: timeout,
+              );
               if (context.mounted) {
+                final l10n = context.l10n;
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Şifre panoya kopyalandı! (30 sn sonra silinir)')),
+                  SnackBar(
+                    content: Text(
+                      l10n.copiedWithTimeout(
+                        l10n.tr('Şifre', 'Password'),
+                        timeout,
+                      ),
+                    ),
+                  ),
                 );
               }
             }

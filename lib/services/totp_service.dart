@@ -1,35 +1,88 @@
-import 'dart:math';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart' as crypto_pkg;
+
+class ParsedOtpAuthUri {
+  final String secret;
+  final String issuer;
+  final String accountName;
+  final int period;
+  final int digits;
+
+  const ParsedOtpAuthUri({
+    required this.secret,
+    this.issuer = '',
+    this.accountName = '',
+    this.period = 30,
+    this.digits = 6,
+  });
+}
 
 class TotpService {
   /// Base32 Alphabet RFC 4648
   static const String _base32Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
-  /// Generates a current 6-digit TOTP code for a given Base32 secret.
-  /// Also supports full otpauth:// URI strings!
+  /// Parses an `otpauth://totp/...` URI into structured components, or returns null.
+  static ParsedOtpAuthUri? parseOtpAuthUri(String raw) {
+    final clean = raw.trim();
+    if (!clean.toLowerCase().startsWith('otpauth://')) return null;
+    final uri = Uri.tryParse(clean);
+    if (uri == null) return null;
+    final secret = uri.queryParameters['secret']?.trim();
+    if (secret == null || secret.isEmpty) return null;
+
+    var label = uri.path.startsWith('/') ? uri.path.substring(1) : uri.path;
+    label = Uri.decodeComponent(label);
+    String issuer = uri.queryParameters['issuer']?.trim() ?? '';
+    String account = label;
+    if (label.contains(':')) {
+      final parts = label.split(':');
+      if (issuer.isEmpty) issuer = parts.first.trim();
+      account = parts.sublist(1).join(':').trim();
+    }
+    final period = int.tryParse(uri.queryParameters['period'] ?? '') ?? 30;
+    final digits = int.tryParse(uri.queryParameters['digits'] ?? '') ?? 6;
+    return ParsedOtpAuthUri(
+      secret: secret.replaceAll(' ', '').toUpperCase(),
+      issuer: issuer,
+      accountName: account,
+      period: period > 0 ? period : 30,
+      digits: (digits >= 6 && digits <= 8) ? digits : 6,
+    );
+  }
+
+  /// Generates a current TOTP code (typically 6 digits) for a given Base32 secret or `otpauth://` URI.
   /// Returns null if secret is empty or invalid.
-  static String? generateCode(String rawSecret, {int? timeMs, int intervalSeconds = 30}) {
+  static String? generateCode(
+    String rawSecret, {
+    int? timeMs,
+    int intervalSeconds = 30,
+    int digits = 6,
+  }) {
     String clean = rawSecret.trim();
     if (clean.isEmpty) return null;
 
-    // Check if input is a full otpauth URI (e.g. otpauth://totp/...?secret=JBSWY3DPEHPK3PXP)
+    int effectiveInterval = intervalSeconds;
+    int effectiveDigits = digits;
+
     if (clean.toLowerCase().startsWith('otpauth://')) {
-      final uri = Uri.tryParse(clean);
-      if (uri != null && uri.queryParameters.containsKey('secret')) {
-        clean = uri.queryParameters['secret']!;
-      }
+      final parsed = parseOtpAuthUri(clean);
+      if (parsed == null) return null;
+      clean = parsed.secret;
+      effectiveInterval = parsed.period;
+      effectiveDigits = parsed.digits;
     }
 
-    final cleanSecret = clean.replaceAll(' ', '').replaceAll('-', '').toUpperCase();
+    final cleanSecret =
+        clean.replaceAll(' ', '').replaceAll('-', '').toUpperCase();
     if (cleanSecret.isEmpty) return null;
 
     try {
       final keyBytes = _decodeBase32(cleanSecret);
       if (keyBytes.isEmpty) return null;
 
-      final int currentSec = (timeMs ?? DateTime.now().millisecondsSinceEpoch) ~/ 1000;
-      final int counter = currentSec ~/ intervalSeconds;
+      final int currentSec =
+          (timeMs ?? DateTime.now().millisecondsSinceEpoch) ~/ 1000;
+      final int counter = currentSec ~/ effectiveInterval;
 
       final ByteData counterBuffer = ByteData(8);
       counterBuffer.setUint64(0, counter, Endian.big);
@@ -44,28 +97,32 @@ class TotpService {
           ((digest[offset + 2] & 0xff) << 8) |
           (digest[offset + 3] & 0xff);
 
-      final int otp = binary % 1000000;
-      return otp.toString().padLeft(6, '0');
+      int mod = 1;
+      for (int i = 0; i < effectiveDigits; i++) {
+        mod *= 10;
+      }
+      final int otp = binary % mod;
+      return otp.toString().padLeft(effectiveDigits, '0');
     } catch (_) {
       return null;
     }
   }
 
-  /// Returns remaining seconds in the current 30-second window (1 to 30)
+  /// Returns remaining seconds in the current window (1 to intervalSeconds)
   static int getRemainingSeconds({int intervalSeconds = 30}) {
     final int currentSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     return intervalSeconds - (currentSec % intervalSeconds);
   }
 
-  /// Returns progress from 0.0 to 1.0 of the current 30-second cycle
+  /// Returns progress from 0.0 to 1.0 of the current cycle
   static double getProgress({int intervalSeconds = 30}) {
-    final int remaining = getRemainingSeconds(intervalSeconds: intervalSeconds);
+    final int remaining =
+        getRemainingSeconds(intervalSeconds: intervalSeconds);
     return remaining / intervalSeconds;
   }
 
   /// Decodes RFC 4648 Base32 string to bytes
   static Uint8List _decodeBase32(String input) {
-    // Remove padding characters '='
     final sanitized = input.replaceAll('=', '');
     final List<int> bytes = [];
 
