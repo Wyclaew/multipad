@@ -324,13 +324,8 @@ class AuditService {
 
       if (item.totpSecret.trim().isEmpty) {
         missing2faCount++;
-        issues.add(AuditIssue(
-          itemId: item.id,
-          title: item.title,
-          issueType: 'missing_2fa',
-          description: '2FA / TOTP koruması eklenmemiş.',
-          severity: 1,
-        ));
+        // Absence of 2FA is kept for informational reporting only,
+        // and is not flagged as a vulnerability or missing security item.
       }
 
       if (item.isPasswordExpired(globalExpiryDays)) {
@@ -439,7 +434,7 @@ class AuditService {
     if (passwordCredentials.isNotEmpty) {
       final weakPenalty = (weakCount / passwordCredentials.length) * 35;
       final reusedPenalty = (reusedCount / passwordCredentials.length) * 25;
-      final no2faPenalty = (missing2faCount / passwordCredentials.length) * 15;
+      const no2faPenalty = 0.0; // Recalibrated: Absence of 2FA is not penalized
       final expiredPenalty = (expiredCount / passwordCredentials.length) * 10;
       final phishingPenalty = phishingRiskCount * 8;
       final cardPenalty = (invalidCardsCount + expiringCardsCount) * 5;

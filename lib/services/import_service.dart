@@ -3,6 +3,7 @@ import 'package:uuid/uuid.dart';
 import 'package:xml/xml.dart';
 import '../models/vault_folder.dart';
 import '../models/vault_item.dart';
+import 'crypto_service.dart';
 
 enum ImportSourceFormat {
   autoDetect,
@@ -41,6 +42,7 @@ class ParsedImportPreview {
   final CsvColumnMapping suggestedMapping;
   final List<VaultItem> directParsedItems;
   final List<VaultFolder> directParsedFolders;
+  final bool isEncrypted;
 
   const ParsedImportPreview({
     required this.detectedFormat,
@@ -49,6 +51,7 @@ class ParsedImportPreview {
     required this.suggestedMapping,
     this.directParsedItems = const [],
     this.directParsedFolders = const [],
+    this.isEncrypted = false,
   });
 }
 
@@ -134,6 +137,19 @@ class ImportService {
     return semicolons > commas ? ';' : ',';
   }
 
+  /// Detects whether raw export string represents an encrypted vault export (e.g. Bitwarden encrypted JSON).
+  static bool isEncryptedExport(String rawContent) {
+    try {
+      final trimmed = rawContent.trimLeft();
+      if (!trimmed.startsWith('{')) return false;
+      final decoded = jsonDecode(trimmed);
+      if (decoded is! Map<String, dynamic>) return false;
+      return decoded['encrypted'] == true || decoded['passwordProtected'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Inspects raw file contents (CSV, Bitwarden JSON, KeePass XML) and prepares preview + auto-mapped columns.
   static ParsedImportPreview inspectFile(
     String rawContent, {
@@ -142,6 +158,18 @@ class ImportService {
   }) {
     final trimmed = rawContent.trimLeft();
     final lowerName = fileName.toLowerCase();
+
+    if (isEncryptedExport(rawContent)) {
+      return ParsedImportPreview(
+        detectedFormat: ImportSourceFormat.bitwardenJson,
+        headers: const [],
+        rows: const [],
+        suggestedMapping: CsvColumnMapping(),
+        directParsedItems: const [],
+        directParsedFolders: const [],
+        isEncrypted: true,
+      );
+    }
 
     if (formatHint == ImportSourceFormat.bitwardenJson ||
         (formatHint == ImportSourceFormat.autoDetect &&
@@ -247,6 +275,45 @@ class ImportService {
       totpIndex: findMatch(['login_totp', 'totp', '2fa', 'otp']),
       notesIndex: findMatch(['notes', 'note', 'comments', 'extra', 'not']),
       folderIndex: findMatch(['folder', 'group', 'klasör', 'kategori']),
+    );
+  }
+
+  /// Inspects raw file contents asynchronously, automatically handling encrypted Bitwarden exports when [decryptionPassword] is provided.
+  static Future<ParsedImportPreview> inspectFileAsync(
+    String rawContent, {
+    String fileName = '',
+    ImportSourceFormat formatHint = ImportSourceFormat.autoDetect,
+    String? decryptionPassword,
+    CryptoService? cryptoService,
+  }) async {
+    if (isEncryptedExport(rawContent)) {
+      if (decryptionPassword == null || decryptionPassword.isEmpty) {
+        return ParsedImportPreview(
+          detectedFormat: ImportSourceFormat.bitwardenJson,
+          headers: const [],
+          rows: const [],
+          suggestedMapping: CsvColumnMapping(),
+          directParsedItems: const [],
+          directParsedFolders: const [],
+          isEncrypted: true,
+        );
+      }
+      final crypto = cryptoService ?? CryptoService();
+      final decryptedJson = await crypto.decryptBitwardenJson(
+        rawContent,
+        decryptionPassword,
+      );
+      return inspectFile(
+        decryptedJson,
+        fileName: fileName,
+        formatHint: ImportSourceFormat.bitwardenJson,
+      );
+    }
+
+    return inspectFile(
+      rawContent,
+      fileName: fileName,
+      formatHint: formatHint,
     );
   }
 
@@ -385,6 +452,40 @@ class ImportService {
             ? (uris.first['uri']?.toString() ?? '')
             : '';
         final pass = login['password']?.toString() ?? '';
+
+        final rawFido2 = (login['fido2Credentials'] as List<dynamic>?) ??
+            (m['fido2Credentials'] as List<dynamic>?) ??
+            (login['passkeys'] as List<dynamic>?) ??
+            (m['passkeys'] as List<dynamic>?) ??
+            const [];
+        final passkeys = <VaultPasskey>[];
+        for (final pk in rawFido2) {
+          if (pk is! Map) continue;
+          final pkMap = Map<String, dynamic>.from(pk);
+          passkeys.add(VaultPasskey(
+            id: _uuid.v4(),
+            credentialId: pkMap['credentialId']?.toString() ?? '',
+            rpId: pkMap['rpId']?.toString() ??
+                (website.isNotEmpty ? Uri.tryParse(website)?.host ?? '' : ''),
+            rpName: pkMap['rpName']?.toString() ?? '',
+            userName: pkMap['userName']?.toString() ??
+                login['username']?.toString() ??
+                '',
+            userHandle: pkMap['userHandle']?.toString() ?? '',
+            privateKey: pkMap['keyValue']?.toString() ??
+                pkMap['privateKey']?.toString() ??
+                '',
+            algorithm: pkMap['algorithm'] as int? ?? -7,
+            createdAt: pkMap['creationDate'] != null
+                ? (DateTime.tryParse(pkMap['creationDate'].toString()) ??
+                    DateTime.now().toUtc())
+                : (pkMap['createdAt'] != null
+                    ? (DateTime.tryParse(pkMap['createdAt'].toString()) ??
+                        DateTime.now().toUtc())
+                    : DateTime.now().toUtc()),
+          ));
+        }
+
         items.add(VaultItem(
           id: _uuid.v4(),
           type: VaultItemType.credential,
@@ -397,6 +498,7 @@ class ImportService {
           folderId: folderId,
           isFavorite: favorite,
           customFields: customFields,
+          passkeys: passkeys,
           tags: const ['Bitwarden'],
           passwordLastModified:
               pass.isNotEmpty ? DateTime.now().toUtc() : null,

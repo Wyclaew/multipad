@@ -46,7 +46,96 @@ class _ImportScreenState extends State<ImportScreen> {
     }
   }
 
-  void _parseContent(String raw, {String fileName = ''}) {
+  Future<String?> _promptDecryptionPassword() async {
+    final ctrl = TextEditingController();
+    bool obscure = true;
+    final result = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          return AlertDialog(
+            title: const Text('Şifreli Dışa Aktarma Parolası'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Bu dosya parola korumalı bir Bitwarden yedeğidir. '
+                  'İçeriği çözümlemek için dışa aktarma parolasını girin.',
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: ctrl,
+                  obscureText: obscure,
+                  autofocus: true,
+                  decoration: InputDecoration(
+                    labelText: 'Şifre Çözme Parolası',
+                    prefixIcon: const Icon(Icons.lock_outline),
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                        obscure ? Icons.visibility : Icons.visibility_off,
+                      ),
+                      onPressed: () =>
+                          setDialogState(() => obscure = !obscure),
+                    ),
+                  ),
+                  onSubmitted: (val) => Navigator.pop(ctx, val),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, null),
+                child: const Text('İptal'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, ctrl.text),
+                child: const Text('Çöz ve Önizle'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    ctrl.dispose();
+    return result;
+  }
+
+  Future<void> _parseContent(String raw, {String fileName = ''}) async {
+    if (ImportService.isEncryptedExport(raw)) {
+      final password = await _promptDecryptionPassword();
+      if (password == null || password.isEmpty) {
+        setState(() {
+          _preview = null;
+          _mapping = null;
+          _error = 'Şifrelenmiş dışa aktarma için parola gereklidir.';
+        });
+        return;
+      }
+      try {
+        final preview = await ImportService.inspectFileAsync(
+          raw,
+          fileName: fileName,
+          formatHint: _formatHint,
+          decryptionPassword: password,
+        );
+        setState(() {
+          _rawContent = raw;
+          _preview = preview;
+          _mapping = preview.suggestedMapping;
+          _error = null;
+        });
+      } catch (e) {
+        setState(() {
+          _preview = null;
+          _mapping = null;
+          _error = 'Şifre çözme hatası: Hatalı parola veya bozuk dosya ($e)';
+        });
+      }
+      return;
+    }
+
     try {
       final preview = ImportService.inspectFile(
         raw,
@@ -90,7 +179,7 @@ class _ImportScreenState extends State<ImportScreen> {
       }
       final raw = utf8.decode(bytes, allowMalformed: true);
       _fileName = file.name;
-      _parseContent(raw, fileName: file.name);
+      await _parseContent(raw, fileName: file.name);
     } catch (e) {
       setState(() => _error = 'Dosya seçim hatası: $e');
     }
@@ -124,7 +213,7 @@ class _ImportScreenState extends State<ImportScreen> {
     ctrl.dispose();
     if (pasted != null && pasted.trim().isNotEmpty) {
       _fileName = 'pasted.txt';
-      _parseContent(pasted);
+      await _parseContent(pasted);
     }
   }
 

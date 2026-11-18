@@ -30,6 +30,11 @@ class MainActivity : FlutterFragmentActivity() {
     private var pendingAction: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+        val isFlagSecureEnabled = prefs.getBoolean("flutter.multipad_flag_secure_enabled", true)
+        if (isFlagSecureEnabled) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
         captureLaunchAction(intent)
         super.onCreate(savedInstanceState)
     }
@@ -152,6 +157,35 @@ class MainActivity : FlutterFragmentActivity() {
                     "clearAutofillIndex" -> {
                         AutofillCryptoStore.clearEntries(applicationContext)
                         result.success(true)
+                    }
+
+                    "getPendingAutofillCredentials" -> {
+                        try {
+                            val list = AutofillCryptoStore.getPendingCredentials(this)
+                            val mapped = list.map { entry ->
+                                mapOf(
+                                    "id" to entry.id,
+                                    "title" to entry.title,
+                                    "website" to entry.website,
+                                    "username" to entry.username,
+                                    "password" to entry.password,
+                                    "packageName" to entry.packageName,
+                                    "timestamp" to entry.timestamp,
+                                )
+                            }
+                            result.success(mapped)
+                        } catch (e: Exception) {
+                            result.error("GET_PENDING_ERROR", e.localizedMessage ?: e.toString(), null)
+                        }
+                    }
+
+                    "clearPendingAutofillCredentials" -> {
+                        try {
+                            AutofillCryptoStore.clearPendingCredentials(this)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("CLEAR_PENDING_ERROR", e.localizedMessage ?: e.toString(), null)
+                        }
                     }
 
                     "openAutofillSettings" -> {

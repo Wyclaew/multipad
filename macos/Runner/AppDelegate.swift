@@ -18,6 +18,9 @@ class AppDelegate: FlutterAppDelegate, NSWindowDelegate {
 
   func attachMethodChannel(viewController: FlutterViewController, window: NSWindow) {
     self.attachedWindow = window
+    if #available(macOS 12.0, *) {
+      window.sharingType = .none
+    }
     let channel = FlutterMethodChannel(
       name: channelName,
       binaryMessenger: viewController.engine.binaryMessenger
@@ -54,7 +57,19 @@ class AppDelegate: FlutterAppDelegate, NSWindowDelegate {
         }
         result(true)
 
-      case "setFlagSecure", "setMulticastLock":
+      case "setFlagSecure":
+        let args = call.arguments as? [String: Any]
+        let enabled = args?["enabled"] as? Bool ?? true
+        DispatchQueue.main.async {
+          if let window = self.attachedWindow ?? self.mainFlutterWindow {
+            if #available(macOS 12.0, *) {
+              window.sharingType = enabled ? .none : .readOnly
+            }
+          }
+        }
+        result(true)
+
+      case "setMulticastLock":
         result(true)
 
       default:

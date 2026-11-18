@@ -15,6 +15,7 @@ import '../providers/vault_provider.dart';
 import '../services/clipboard_service.dart';
 import '../services/totp_migration_service.dart';
 import '../services/totp_service.dart';
+import '../services/totp_ticker_service.dart';
 import '../widgets/qr_scanner_dialog.dart';
 import 'credential_editor_screen.dart';
 
@@ -35,16 +36,16 @@ class AuthenticatorScreen extends StatefulWidget {
 
 class _AuthenticatorScreenState extends State<AuthenticatorScreen> {
   final _searchCtrl = TextEditingController();
-  Timer? _ticker;
+  StreamSubscription<int>? _tickerSub;
   int _nowMs = DateTime.now().millisecondsSinceEpoch;
 
   @override
   void initState() {
     super.initState();
-    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+    _tickerSub = TotpTickerService.instance.tickStream.listen((nowMs) {
       if (mounted) {
         setState(() {
-          _nowMs = DateTime.now().millisecondsSinceEpoch;
+          _nowMs = nowMs;
         });
       }
     });
@@ -60,7 +61,8 @@ class _AuthenticatorScreenState extends State<AuthenticatorScreen> {
 
   @override
   void dispose() {
-    _ticker?.cancel();
+    _tickerSub?.cancel();
+    _tickerSub = null;
     _searchCtrl.dispose();
     super.dispose();
   }

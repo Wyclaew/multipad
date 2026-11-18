@@ -227,13 +227,15 @@ class CryptoService {
   }
 
   /// Constant-time byte comparison to prevent timing side-channel attacks.
+  /// Accumulates length differences into bitwise OR rather than early exiting,
+  /// preventing length discrepancy information leakage via execution timing.
   static bool constantTimeEquals(List<int> a, List<int> b) {
-    if (a.length != b.length) return false;
-    int result = 0;
-    for (int i = 0; i < a.length; i++) {
-      result |= a[i] ^ b[i];
+    int diff = a.length ^ b.length;
+    final minLen = a.length < b.length ? a.length : b.length;
+    for (int i = 0; i < minLen; i++) {
+      diff |= a[i] ^ b[i];
     }
-    return result == 0;
+    return diff == 0;
   }
 
   /// Constant-time string comparison.
@@ -250,6 +252,211 @@ class CryptoService {
       } catch (_) {
         // Unmodifiable Uint8List views (e.g. from external crypto libraries) cannot be mutated in-place.
       }
+    }
+  }
+
+  /// RFC 5869 HKDF-Expand with HMAC-SHA256 producing a subkey of requested length.
+  static Uint8List hkdfExpandSha256(List<int> prk, String info, [int length = 32]) {
+    final hmac = crypto_pkg.Hmac(crypto_pkg.sha256, prk);
+    final infoBytes = utf8.encode(info);
+    final output = <int>[];
+    List<int> t = [];
+    int blockIndex = 1;
+    while (output.length < length) {
+      final input = <int>[...t, ...infoBytes, blockIndex];
+      t = hmac.convert(input).bytes;
+      output.addAll(t);
+      blockIndex++;
+    }
+    return Uint8List.fromList(output.sublist(0, length));
+  }
+
+  /// Derives Bitwarden-compatible encryption and MAC keys from password and salt.
+  Future<({Uint8List encKey, Uint8List macKey})> deriveBitwardenSubKeys({
+    required String password,
+    required String salt,
+    int kdfType = 0,
+    int? iterations,
+    int? kdfIterations,
+    int? memoryKib,
+    int? kdfMemory,
+    int? parallelism,
+    int? kdfParallelism,
+  }) async {
+    final actualIterations = iterations ?? kdfIterations ?? 100000;
+    final actualMemory = memoryKib ?? kdfMemory ?? 64;
+    final actualParallelism = parallelism ?? kdfParallelism ?? 4;
+
+    return Isolate.run(() async {
+      List<int> saltBytes;
+      try {
+        saltBytes = base64Decode(salt);
+        if (saltBytes.isEmpty) {
+          saltBytes = utf8.encode(salt.toLowerCase().trim());
+        }
+      } catch (_) {
+        saltBytes = utf8.encode(salt.toLowerCase().trim());
+      }
+
+      Uint8List masterKeyBytes;
+      if (kdfType == 1) {
+        // Argon2id: Bitwarden memory is in MB or KiB
+        final memKib = actualMemory > 1024 ? actualMemory : actualMemory * 1024;
+        final iters = actualIterations > 0 ? actualIterations : 3;
+        final par = actualParallelism > 0 ? actualParallelism : 4;
+
+        final argon2 = Argon2id(
+          memory: memKib,
+          iterations: iters,
+          parallelism: par,
+          hashLength: 32,
+        );
+        final secretKey = await argon2.deriveKeyFromPassword(
+          password: password,
+          nonce: saltBytes,
+        );
+        masterKeyBytes = Uint8List.fromList(await secretKey.extractBytes());
+      } else {
+        // PBKDF2-HMAC-SHA256
+        final iters = actualIterations > 0 ? actualIterations : 100000;
+        final pbkdf2 = Pbkdf2(
+          macAlgorithm: Hmac.sha256(),
+          iterations: iters,
+          bits: 256,
+        );
+        final secretKey = await pbkdf2.deriveKey(
+          secretKey: SecretKey(utf8.encode(password)),
+          nonce: saltBytes,
+        );
+        masterKeyBytes = Uint8List.fromList(await secretKey.extractBytes());
+      }
+
+      final encKey = hkdfExpandSha256(masterKeyBytes, 'enc', 32);
+      final macKey = hkdfExpandSha256(masterKeyBytes, 'mac', 32);
+      CryptoService.wipe(masterKeyBytes);
+
+      return (encKey: encKey, macKey: macKey);
+    });
+  }
+
+  /// Encrypts plaintext string into Bitwarden CipherString format: `2.<iv>|<ciphertext>|<mac>`.
+  Future<String> encryptBitwardenCipherString({
+    required String plaintext,
+    required List<int> encKey,
+    required List<int> macKey,
+    List<int>? ivOverride,
+  }) async {
+    final iv = ivOverride != null
+        ? Uint8List.fromList(ivOverride)
+        : generateRandomBytes(16);
+
+    final aesCbc = AesCbc.with256bits(macAlgorithm: MacAlgorithm.empty);
+    final secretBox = await aesCbc.encrypt(
+      utf8.encode(plaintext),
+      secretKey: SecretKey(encKey),
+      nonce: iv,
+    );
+
+    final ivB64 = base64Encode(iv);
+    final cipherB64 = base64Encode(secretBox.cipherText);
+
+    final macPayload = Uint8List.fromList([...iv, ...secretBox.cipherText]);
+    final hmac = crypto_pkg.Hmac(crypto_pkg.sha256, macKey);
+    final macDigest = hmac.convert(macPayload);
+    final macB64 = base64Encode(macDigest.bytes);
+
+    return '2.$ivB64|$cipherB64|$macB64';
+  }
+
+  /// Decrypts a Bitwarden CipherString (`2.<iv>|<ciphertext>|<mac>`) with HMAC-SHA256 verification.
+  Future<String> decryptBitwardenCipherString({
+    required String cipherString,
+    required List<int> encKey,
+    required List<int> macKey,
+  }) async {
+    if (!cipherString.startsWith('2.')) {
+      throw const FormatException('Unsupported or invalid Bitwarden encType');
+    }
+    final raw = cipherString.substring(2);
+    final parts = raw.split('|');
+    if (parts.length != 3) {
+      throw const FormatException('Invalid Bitwarden CipherString structure');
+    }
+
+    final Uint8List iv;
+    final Uint8List cipherText;
+    final Uint8List expectedMac;
+    try {
+      iv = base64Decode(parts[0]);
+      cipherText = base64Decode(parts[1]);
+      expectedMac = base64Decode(parts[2]);
+    } catch (e) {
+      throw FormatException('Invalid base64 in Bitwarden CipherString: $e');
+    }
+
+    if (iv.length != 16) {
+      throw const FormatException('Invalid IV length for AES-CBC');
+    }
+
+    // Verify HMAC-SHA256 in constant time
+    final macPayload = Uint8List.fromList([...iv, ...cipherText]);
+    final hmac = crypto_pkg.Hmac(crypto_pkg.sha256, macKey);
+    final calculatedMac = hmac.convert(macPayload).bytes;
+
+    if (!CryptoService.constantTimeEquals(calculatedMac, expectedMac)) {
+      throw const FormatException('Bitwarden MAC verification failed (wrong password or tampered data)');
+    }
+
+    try {
+      final aesCbc = AesCbc.with256bits(macAlgorithm: MacAlgorithm.empty);
+      final decryptedBytes = await aesCbc.decrypt(
+        SecretBox(cipherText, nonce: iv, mac: Mac.empty),
+        secretKey: SecretKey(encKey),
+      );
+      return utf8.decode(decryptedBytes);
+    } catch (e) {
+      throw FormatException('Bitwarden AES-CBC decryption failed: $e');
+    }
+  }
+
+  /// High-level decryption of a Bitwarden password-protected encrypted JSON export string.
+  Future<String> decryptBitwardenJson(String rawJson, String password) async {
+    final decoded = jsonDecode(rawJson);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('Invalid Bitwarden JSON export structure');
+    }
+    final salt = (decoded['salt'] ?? decoded['userEmail'] ?? '').toString();
+    if (salt.isEmpty) {
+      throw const FormatException('Bitwarden encrypted export missing salt');
+    }
+    final kdfType = (decoded['kdfType'] ?? decoded['kdf'] ?? 0) as int;
+    final kdfIterations = (decoded['kdfIterations'] ?? decoded['iterations'] ?? 100000) as int;
+    final kdfMemory = (decoded['kdfMemory'] ?? decoded['memory'] ?? 64) as int;
+    final kdfParallelism = (decoded['kdfParallelism'] ?? decoded['parallelism'] ?? 4) as int;
+    final cipherString = decoded['data']?.toString();
+
+    if (cipherString == null || cipherString.isEmpty) {
+      throw const FormatException('Bitwarden encrypted JSON missing data cipherstring');
+    }
+
+    final subkeys = await deriveBitwardenSubKeys(
+      password: password,
+      salt: salt,
+      kdfType: kdfType,
+      iterations: kdfIterations,
+      memoryKib: kdfMemory,
+      parallelism: kdfParallelism,
+    );
+
+    try {
+      return await decryptBitwardenCipherString(
+        cipherString: cipherString,
+        encKey: subkeys.encKey,
+        macKey: subkeys.macKey,
+      );
+    } finally {
+      CryptoService.wipe(subkeys.encKey);
+      CryptoService.wipe(subkeys.macKey);
     }
   }
 }

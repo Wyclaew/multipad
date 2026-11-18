@@ -37,11 +37,14 @@ class NativeBridgeService {
 
   static Future<void> _consumePendingLaunchAction() async {
     try {
-      final action =
-          await _channel.invokeMethod<String>('consumePendingLaunchAction');
+      final action = await _channel
+          .invokeMethod<String>('consumePendingLaunchAction')
+          .timeout(const Duration(milliseconds: 300));
       if (action == 'quick_search') {
         _onQuickSearchRequested?.call();
       }
+    } on TimeoutException {
+      // Ignored if platform does not respond promptly.
     } on MissingPluginException {
       // Ignored on platforms without launch action support or in unit tests.
     } catch (e) {
@@ -157,6 +160,42 @@ class NativeBridgeService {
       // Ignored when plugin channel is unavailable (e.g., tests).
     } catch (e) {
       debugPrint('clearAutofillIndex error: $e');
+    }
+  }
+
+  /// Retrieves credentials captured by Android Autofill while app was in background.
+  static Future<List<Map<String, dynamic>>> getPendingAutofillCredentials() async {
+    if (kIsWeb) return [];
+    if (!Platform.isAndroid && !Platform.environment.containsKey('FLUTTER_TEST')) {
+      return [];
+    }
+    try {
+      final result = await _channel.invokeMethod<List<dynamic>>('getPendingAutofillCredentials');
+      if (result == null) return [];
+      return result
+          .whereType<Map>()
+          .map((m) => Map<String, dynamic>.from(m))
+          .toList();
+    } on MissingPluginException {
+      return [];
+    } catch (e) {
+      debugPrint('getPendingAutofillCredentials error: $e');
+      return [];
+    }
+  }
+
+  /// Clears pending autofill credentials after they have been processed or saved.
+  static Future<void> clearPendingAutofillCredentials() async {
+    if (kIsWeb) return;
+    if (!Platform.isAndroid && !Platform.environment.containsKey('FLUTTER_TEST')) {
+      return;
+    }
+    try {
+      await _channel.invokeMethod('clearPendingAutofillCredentials');
+    } on MissingPluginException {
+      // Ignored when plugin channel is unavailable (e.g., tests).
+    } catch (e) {
+      debugPrint('clearPendingAutofillCredentials error: $e');
     }
   }
 

@@ -1,6 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
@@ -8,6 +12,7 @@ import '../constants.dart';
 import '../models/sync_conflict.dart';
 import '../models/vault_folder.dart';
 import '../models/vault_item.dart';
+import '../services/audit_service.dart';
 import '../services/crypto_service.dart';
 import '../services/native_bridge_service.dart';
 import '../services/offline_storage_service.dart';
@@ -24,6 +29,16 @@ enum VaultCategoryFilter {
   license,
   favorites,
   trash,
+  bankAccounts,
+  servers,
+  databases,
+  cryptoWallets,
+}
+
+enum VaultSortOrder {
+  az,
+  za,
+  recentlyUpdated,
 }
 
 enum SyncMergeDecision {
@@ -49,6 +64,7 @@ class VaultProvider with ChangeNotifier {
   bool _reloadRequested = false;
   String _searchQuery = '';
   VaultCategoryFilter _currentCategory = VaultCategoryFilter.all;
+  VaultSortOrder _sortOrder = VaultSortOrder.az;
   String? _selectedFolderId;
   bool _autofillEnabled = true;
 
@@ -76,6 +92,7 @@ class VaultProvider with ChangeNotifier {
   bool get isDuressMode => _isDuressMode;
   String get searchQuery => _searchQuery;
   VaultCategoryFilter get currentCategory => _currentCategory;
+  VaultSortOrder get sortOrder => _sortOrder;
   String? get selectedFolderId => _selectedFolderId;
   bool get isOnlineSyncActive => _isOnlineSyncActive;
   bool get isSelectionMode => _isSelectionMode;
@@ -206,18 +223,80 @@ class VaultProvider with ChangeNotifier {
       if (!_isActive && _masterKey == null && _items.isEmpty) return;
       _isActive = false;
       _isDuressMode = false;
-      CryptoService.wipe(_masterKey);
-      _masterKey = null;
-      _items = [];
-      _conflicts = [];
-      _selectedFolderId = null;
-      _selectedItemIds.clear();
-      _isSelectionMode = false;
-      _isOnlineSyncActive = false;
-      _subscription?.unsubscribe();
-      _subscription = null;
-      notifyListeners();
+      wipe();
     }
+  }
+
+  AuditReport? _cachedAuditReport;
+  bool _auditDirty = true;
+  int _lastAuditExpiryDays = 90;
+
+  /// Returns memoized vault audit report, recomputed only when items mutate.
+  AuditReport get auditReport => getAuditReport();
+
+  /// Returns memoized audit report for the current items, caching Levenshtein computations.
+  AuditReport getAuditReport({int expiryDays = 90}) {
+    if (_cachedAuditReport == null || _auditDirty || _lastAuditExpiryDays != expiryDays) {
+      _cachedAuditReport = AuditService.analyzeVault(
+        items,
+        globalExpiryDays: expiryDays,
+      );
+      _lastAuditExpiryDays = expiryDays;
+      _auditDirty = false;
+    }
+    return _cachedAuditReport!;
+  }
+
+  /// Invalidates the cached audit report (called whenever items mutate).
+  void invalidateAuditReport() {
+    _auditDirty = true;
+    _cachedAuditReport = null;
+  }
+
+  /// Securely locks the vault and purges all sensitive cryptographic and credential data from RAM.
+  void lockVault() {
+    wipe();
+  }
+
+  /// Wipes all in-memory decrypted items, clears caches, and invokes OS memory pressure.
+  void wipe() {
+    for (final item in _items) {
+      item.wipeSecrets();
+    }
+    CryptoService.wipe(_masterKey);
+    _masterKey = null;
+    _items = [];
+    _conflicts = [];
+    _selectedFolderId = null;
+    _selectedItemIds.clear();
+    _isSelectionMode = false;
+    _isOnlineSyncActive = false;
+    _subscription?.unsubscribe();
+    _subscription = null;
+    invalidateAuditReport();
+
+    // Clear autofill hardware keystore cache
+    NativeBridgeService.clearAutofillIndex();
+
+    // Clear decoded image memory buffers
+    try {
+      PaintingBinding.instance.imageCache.clear();
+      PaintingBinding.instance.imageCache.clearLiveImages();
+    } catch (_) {}
+
+    // Advise runtime to clean old-generation garbage immediately
+    try {
+      WidgetsBinding.instance.handleMemoryPressure();
+    } catch (_) {}
+
+    notifyListeners();
+  }
+
+  @visibleForTesting
+  void setItemsForTesting(List<VaultItem> items) {
+    _items = List.from(items);
+    invalidateAuditReport();
+    notifyListeners();
   }
 
   bool _listEquals(List<int> a, List<int> b) {
@@ -286,6 +365,18 @@ class VaultProvider with ChangeNotifier {
         case VaultCategoryFilter.favorites:
           result = result.where((i) => i.isFavorite);
           break;
+        case VaultCategoryFilter.bankAccounts:
+          result = result.where((i) => i.type == VaultItemType.bankAccount);
+          break;
+        case VaultCategoryFilter.servers:
+          result = result.where((i) => i.type == VaultItemType.server);
+          break;
+        case VaultCategoryFilter.databases:
+          result = result.where((i) => i.type == VaultItemType.database);
+          break;
+        case VaultCategoryFilter.cryptoWallets:
+          result = result.where((i) => i.type == VaultItemType.cryptoWallet);
+          break;
         case VaultCategoryFilter.all:
         case VaultCategoryFilter.trash:
           break;
@@ -293,30 +384,85 @@ class VaultProvider with ChangeNotifier {
     }
 
     if (_searchQuery.trim().isNotEmpty) {
-      final q = _searchQuery.toLowerCase().trim();
-      result = result.where((i) {
-        final inFields = i.customFields.any(
-          (f) =>
-              f.label.toLowerCase().contains(q) ||
-              (!f.isHidden && f.value.toLowerCase().contains(q)),
-        );
-        return i.title.toLowerCase().contains(q) ||
-            i.content.toLowerCase().contains(q) ||
-            i.username.toLowerCase().contains(q) ||
-            i.website.toLowerCase().contains(q) ||
-            i.cardHolder.toLowerCase().contains(q) ||
-            i.wifiSsid.toLowerCase().contains(q) ||
-            i.fullName.toLowerCase().contains(q) ||
-            i.idNumber.toLowerCase().contains(q) ||
-            i.productName.toLowerCase().contains(q) ||
-            i.tags.any((t) => t.toLowerCase().contains(q)) ||
-            inFields;
-      });
+      final tokens = _searchQuery.trim().split(RegExp(r'\s+'));
+      final textTokens = <String>[];
+      VaultItemType? tokenTypeFilter;
+      bool? tokenFavoriteFilter;
+      bool? tokenTrashFilter;
+      bool? tokenTotpFilter;
+      String? tokenTagFilter;
+
+      for (final rawToken in tokens) {
+        final lower = rawToken.toLowerCase();
+        if (lower.startsWith('type:')) {
+          tokenTypeFilter = VaultItem.typeFromString(lower.substring(5));
+        } else if (lower == 'is:favorite' || lower == 'is:fav') {
+          tokenFavoriteFilter = true;
+        } else if (lower == 'is:trash') {
+          tokenTrashFilter = true;
+        } else if (lower == 'has:totp' || lower == 'has:2fa') {
+          tokenTotpFilter = true;
+        } else if (lower.startsWith('tag:')) {
+          tokenTagFilter = lower.substring(4);
+        } else {
+          textTokens.add(rawToken.toLowerCase());
+        }
+      }
+
+      if (tokenTrashFilter == true) {
+        result = _items.where((i) => !i.isDeleted && i.isTrash && i.type != VaultItemType.folder);
+      }
+      if (tokenTypeFilter != null) {
+        result = result.where((i) => i.type == tokenTypeFilter);
+      }
+      if (tokenFavoriteFilter == true) {
+        result = result.where((i) => i.isFavorite);
+      }
+      if (tokenTotpFilter == true) {
+        result = result.where((i) => i.totpSecret.trim().isNotEmpty || i.customFields.any((f) => f.type == CustomFieldType.otp));
+      }
+      if (tokenTagFilter != null && tokenTagFilter.isNotEmpty) {
+        result = result.where((i) => i.tags.any((t) => t.toLowerCase() == tokenTagFilter));
+      }
+
+      if (textTokens.isNotEmpty) {
+        final q = textTokens.join(' ');
+        result = result.where((i) {
+          final inFields = i.customFields.any(
+            (f) =>
+                f.label.toLowerCase().contains(q) ||
+                (!f.isHidden && f.value.toLowerCase().contains(q)),
+          );
+          return i.title.toLowerCase().contains(q) ||
+              i.content.toLowerCase().contains(q) ||
+              i.username.toLowerCase().contains(q) ||
+              i.website.toLowerCase().contains(q) ||
+              i.cardHolder.toLowerCase().contains(q) ||
+              i.wifiSsid.toLowerCase().contains(q) ||
+              i.fullName.toLowerCase().contains(q) ||
+              i.idNumber.toLowerCase().contains(q) ||
+              i.productName.toLowerCase().contains(q) ||
+              i.bankName.toLowerCase().contains(q) ||
+              i.bankAccountHolder.toLowerCase().contains(q) ||
+              i.bankIban.toLowerCase().contains(q) ||
+              i.serverHost.toLowerCase().contains(q) ||
+              i.databaseName.toLowerCase().contains(q) ||
+              i.cryptoWalletAddress.toLowerCase().contains(q) ||
+              i.tags.any((t) => t.toLowerCase().contains(q)) ||
+              inFields;
+        });
+      }
     }
 
     final list = result.toList();
     _sortItems(list);
     return list;
+  }
+
+  void setSortOrder(VaultSortOrder order) {
+    if (_sortOrder == order) return;
+    _sortOrder = order;
+    notifyListeners();
   }
 
   void setSearchQuery(String query) {
@@ -423,19 +569,46 @@ class VaultProvider with ChangeNotifier {
         return;
       }
 
-      // 1. Load SQLite cache & decrypt local items
+      // ==========================================
+      // PHASE 1: Immediate Local SQLite Render (<50ms)
+      // ==========================================
       final localRows = await OfflineStorageService.loadLocalItems();
+      final localItems = await decryptRowsParallel(
+        rows: localRows,
+        masterKey: _masterKey!,
+      );
+
       final Map<String, Map<String, dynamic>> localById = {};
       final Map<String, VaultItem?> localDecryptedById = {};
       for (final r in localRows) {
         final id = r['id'] as String?;
-        if (id == null || id.isEmpty) continue;
-        localById[id] = r;
-        localDecryptedById[id] = await _decryptRow(r);
+        if (id != null && id.isNotEmpty) {
+          localById[id] = r;
+        }
+      }
+      for (final item in localItems) {
+        localDecryptedById[item.id] = item;
       }
 
-      final List<SyncConflict> detectedConflicts = [];
       final Map<String, VaultItem> finalVisibleItems = {};
+      for (final item in localItems) {
+        if (!item.isDeleted) {
+          finalVisibleItems[item.id] = item;
+        }
+      }
+
+      // Instantly render local items to UI in Phase 1
+      final initialLoaded = finalVisibleItems.values.toList();
+      _sortItems(initialLoaded);
+      _items = initialLoaded;
+      _isLoading = false;
+      notifyListeners();
+      await syncAutofillIndex(_autofillEnabled);
+
+      // ==========================================
+      // PHASE 2: Asynchronous Cloud Delta-Sync
+      // ==========================================
+      final List<SyncConflict> detectedConflicts = [];
 
       if (SupabaseService.isInitialized && SupabaseService.currentUser != null) {
         try {
@@ -444,11 +617,33 @@ class VaultProvider with ChangeNotifier {
 
           final Map<String, Map<String, dynamic>> remoteById = {};
           final Map<String, VaultItem?> remoteDecryptedById = {};
+          final List<Map<String, dynamic>> remoteToDecrypt = [];
+
           for (final r in remoteRows) {
             final id = r['id'] as String?;
             if (id == null || id.isEmpty) continue;
             remoteById[id] = r;
-            remoteDecryptedById[id] = await _decryptRow(r);
+
+            final localRow = localById[id];
+            // Reuse already decrypted local item if ciphertext matches
+            if (localRow != null &&
+                localRow['encrypted_payload'] == r['encrypted_payload'] &&
+                localDecryptedById.containsKey(id) &&
+                localDecryptedById[id] != null) {
+              remoteDecryptedById[id] = localDecryptedById[id];
+            } else {
+              remoteToDecrypt.add(r);
+            }
+          }
+
+          if (remoteToDecrypt.isNotEmpty) {
+            final decryptedRemotes = await decryptRowsParallel(
+              rows: remoteToDecrypt,
+              masterKey: _masterKey!,
+            );
+            for (final item in decryptedRemotes) {
+              remoteDecryptedById[item.id] = item;
+            }
           }
 
           final allIds = {...localById.keys, ...remoteById.keys};
@@ -466,6 +661,7 @@ class VaultProvider with ChangeNotifier {
                 if (local['is_deleted'] == true) {
                   await _supabaseService.deleteVaultItem(id);
                   await OfflineStorageService.removeLocalItem(id);
+                  finalVisibleItems.remove(id);
                 } else {
                   await _supabaseService.upsertVaultItem(local);
                   final hash = localItem?.computeContentHash() ?? '';
@@ -477,6 +673,7 @@ class VaultProvider with ChangeNotifier {
               } else {
                 // Previously synced cleanly and hard-removed remotely
                 await OfflineStorageService.removeLocalItem(id);
+                finalVisibleItems.remove(id);
               }
             } else if (local == null && remote != null) {
               final rHash = remoteItem?.computeContentHash() ?? '';
@@ -513,8 +710,12 @@ class VaultProvider with ChangeNotifier {
                     dirty: false,
                     baseHash: remoteHash ?? '',
                   );
-                  if (remoteItem != null && !remoteItem.isDeleted) {
-                    finalVisibleItems[id] = remoteItem;
+                  if (remoteItem != null) {
+                    if (remoteItem.isDeleted) {
+                      finalVisibleItems.remove(id);
+                    } else {
+                      finalVisibleItems[id] = remoteItem;
+                    }
                   }
                   break;
                 case SyncMergeDecision.pushLocal:
@@ -524,6 +725,7 @@ class VaultProvider with ChangeNotifier {
                       id,
                       localHash ?? '',
                     );
+                    finalVisibleItems.remove(id);
                   } else {
                     await _supabaseService.upsertVaultItem(local);
                     await OfflineStorageService.markItemSynced(
@@ -555,33 +757,22 @@ class VaultProvider with ChangeNotifier {
               }
             }
           }
+
+          final updatedLoaded = finalVisibleItems.values.toList();
+          _sortItems(updatedLoaded);
+          _items = updatedLoaded;
+          _conflicts = detectedConflicts;
+          await syncAutofillIndex(_autofillEnabled);
+          notifyListeners();
         } catch (syncErr) {
           debugPrint(
             'Cloud sync skipped (offline or timeout), loading local SQLite cache: $syncErr',
           );
           _isOnlineSyncActive = false;
-          for (final entry in localDecryptedById.entries) {
-            final item = entry.value;
-            if (item != null && !item.isDeleted) {
-              finalVisibleItems[entry.key] = item;
-            }
-          }
         }
       } else {
         _isOnlineSyncActive = false;
-        for (final entry in localDecryptedById.entries) {
-          final item = entry.value;
-          if (item != null && !item.isDeleted) {
-            finalVisibleItems[entry.key] = item;
-          }
-        }
       }
-
-      final loaded = finalVisibleItems.values.toList();
-      _sortItems(loaded);
-      _items = loaded;
-      _conflicts = detectedConflicts;
-      await syncAutofillIndex(_autofillEnabled);
     } finally {
       _isLoading = false;
       _isSyncingVault = false;
@@ -752,10 +943,23 @@ class VaultProvider with ChangeNotifier {
   }
 
   void _sortItems(List<VaultItem> list) {
+    invalidateAuditReport();
     list.sort((a, b) {
       if (a.isPinned && !b.isPinned) return -1;
       if (!a.isPinned && b.isPinned) return 1;
-      return b.clientUpdatedAt.compareTo(a.clientUpdatedAt);
+
+      switch (_sortOrder) {
+        case VaultSortOrder.az:
+          final cmp = a.title.toLowerCase().compareTo(b.title.toLowerCase());
+          if (cmp != 0) return cmp;
+          return b.clientUpdatedAt.compareTo(a.clientUpdatedAt);
+        case VaultSortOrder.za:
+          final cmp = b.title.toLowerCase().compareTo(a.title.toLowerCase());
+          if (cmp != 0) return cmp;
+          return b.clientUpdatedAt.compareTo(a.clientUpdatedAt);
+        case VaultSortOrder.recentlyUpdated:
+          return b.clientUpdatedAt.compareTo(a.clientUpdatedAt);
+      }
     });
   }
 
@@ -827,44 +1031,87 @@ class VaultProvider with ChangeNotifier {
     });
   }
 
+  /// Static isolate-safe chunk decryptor
+  static Future<List<VaultItem>> _decryptRowsInIsolate(
+    List<Map<String, dynamic>> chunk,
+    Uint8List masterKeyCopy,
+  ) async {
+    final crypto = CryptoService();
+    final results = <VaultItem>[];
+    for (final row in chunk) {
+      final ciphertext = row['encrypted_payload'] as String?;
+      final iv = row['iv'] as String?;
+      final mac = row['mac'] as String?;
+      final id = row['id'] as String?;
+      final userId = row['user_id'] as String?;
+      final isDeleted = row['is_deleted'] == true || row['is_deleted'] == 1;
+      final clientUpdatedAtStr = row['client_updated_at'] as String?;
+
+      if (ciphertext == null || iv == null || mac == null || id == null) {
+        continue;
+      }
+      try {
+        final plainJsonStr = await crypto.decryptData(
+          ciphertextBase64: ciphertext,
+          ivBase64: iv,
+          macBase64: mac,
+          masterKey: masterKeyCopy,
+        );
+        final Map<String, dynamic> payload = jsonDecode(plainJsonStr);
+        final rawType =
+            row['item_type'] as String? ??
+            (payload['item_type'] as String? ?? 'note');
+        results.add(
+          VaultItem.fromDecryptedJson(
+            id: id,
+            userId: userId,
+            type: VaultItem.typeFromString(rawType),
+            decryptedPayload: payload,
+            isDeleted: isDeleted,
+            clientUpdatedAt:
+                DateTime.tryParse(clientUpdatedAtStr ?? '') ??
+                DateTime.now().toUtc(),
+          ),
+        );
+      } catch (e) {
+        debugPrint('Parallel decrypt warning for row $id: $e');
+      }
+    }
+    return results;
+  }
+
+  /// Parallel chunk decryption splitting rows across isolates
+  static Future<List<VaultItem>> decryptRowsParallel({
+    required List<Map<String, dynamic>> rows,
+    required List<int> masterKey,
+    int maxChunks = 4,
+  }) async {
+    if (rows.isEmpty) return [];
+    final keyCopy = Uint8List.fromList(masterKey);
+    if (rows.length <= 4) {
+      return _decryptRowsInIsolate(rows, keyCopy);
+    }
+
+    final chunkSize = (rows.length / maxChunks).ceil();
+    final chunks = <List<Map<String, dynamic>>>[];
+    for (int i = 0; i < rows.length; i += chunkSize) {
+      chunks.add(rows.sublist(i, min(i + chunkSize, rows.length)));
+    }
+
+    final chunkFutures = chunks.map(
+      (chunk) => Isolate.run(() => _decryptRowsInIsolate(chunk, keyCopy)),
+    );
+    final results = await Future.wait(chunkFutures);
+    return results.expand((list) => list).toList();
+  }
+
   Future<VaultItem?> _decryptRow(Map<String, dynamic> row) async {
     if (_masterKey == null) return null;
-    final ciphertext = row['encrypted_payload'] as String?;
-    final iv = row['iv'] as String?;
-    final mac = row['mac'] as String?;
-    final id = row['id'] as String?;
-    final userId = row['user_id'] as String?;
-    final isDeleted = row['is_deleted'] == true || row['is_deleted'] == 1;
-    final clientUpdatedAtStr = row['client_updated_at'] as String?;
-
-    if (ciphertext == null || iv == null || mac == null || id == null) {
-      return null;
-    }
-
-    try {
-      final plainJsonStr = await _cryptoService.decryptData(
-        ciphertextBase64: ciphertext,
-        ivBase64: iv,
-        macBase64: mac,
-        masterKey: _masterKey!,
-      );
-      final Map<String, dynamic> payload = jsonDecode(plainJsonStr);
-      final rawType =
-          row['item_type'] as String? ??
-          (payload['item_type'] as String? ?? 'note');
-      return VaultItem.fromDecryptedJson(
-        id: id,
-        userId: userId,
-        type: VaultItem.typeFromString(rawType),
-        decryptedPayload: payload,
-        isDeleted: isDeleted,
-        clientUpdatedAt:
-            DateTime.tryParse(clientUpdatedAtStr ?? '') ?? DateTime.now().toUtc(),
-      );
-    } catch (e) {
-      debugPrint('Failed to decrypt item $id: $e');
-      return null;
-    }
+    final items = await _decryptRowsInIsolate(
+      [row],
+      Uint8List.fromList(_masterKey!),
+    );
+    return items.isNotEmpty ? items.first : null;
   }
 
   Future<void> _persistItemEncrypted(

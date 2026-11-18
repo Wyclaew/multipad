@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+import 'package:uuid/uuid.dart';
 import '../l10n/app_localizations.dart';
 import '../models/vault_item.dart';
 import '../providers/auth_provider.dart';
@@ -45,6 +48,7 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
   late List<String> _tags;
   late List<CustomField> _customFields;
   late List<VaultItemRevision> _revisions;
+  late List<VaultPasskey> _passkeys;
   String? _folderId;
   late bool _isFavorite;
   late bool _isPinned;
@@ -84,6 +88,7 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
     _tags = List<String>.from(item?.tags ?? const []);
     _customFields = List<CustomField>.from(item?.customFields ?? const []);
     _revisions = List<VaultItemRevision>.from(item?.revisions ?? const []);
+    _passkeys = List<VaultPasskey>.from(item?.passkeys ?? const []);
     _folderId = item?.folderId ?? widget.initialFolderId;
     _originalFolderId = _folderId;
 
@@ -133,7 +138,8 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
       _titleController.text != _originalTitle ||
       _usernameController.text != _originalUsername ||
       _passwordController.text != _initialPassword ||
-      _folderId != _originalFolderId;
+      _folderId != _originalFolderId ||
+      _passkeys.length != (widget.initialItem?.passkeys.length ?? 0);
 
   Future<void> _copyField(String value, String label) async {
     final timeout = context.read<SettingsProvider>().clipboardTimeoutSeconds;
@@ -235,6 +241,115 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
     }
   }
 
+  void _showAddPasskeyDialog() {
+    String suggestedRpId = '';
+    final web = _websiteController.text.trim();
+    if (web.isNotEmpty) {
+      try {
+        final uri = Uri.parse(web.startsWith('http') ? web : 'https://$web');
+        suggestedRpId = uri.host.replaceFirst(RegExp(r'^www\.'), '');
+      } catch (_) {
+        suggestedRpId = web;
+      }
+    }
+    if (suggestedRpId.isEmpty) {
+      final user = _usernameController.text.trim();
+      if (user.contains('@')) {
+        suggestedRpId = user.split('@').last;
+      }
+    }
+
+    final rpController = TextEditingController(text: suggestedRpId);
+    final userController = TextEditingController(text: _usernameController.text.trim());
+    final credIdController = TextEditingController();
+
+    showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.fingerprint, color: Colors.purpleAccent),
+              SizedBox(width: 8),
+              Text('Passkey Ekle'),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Bu hesaba bir WebAuthn / FIDO2 Passkey kimliği bağlayın.',
+                  style: TextStyle(fontSize: 13),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: rpController,
+                  decoration: const InputDecoration(
+                    labelText: 'Alan Adı / RP ID (örn. google.com)',
+                    prefixIcon: Icon(Icons.language),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: userController,
+                  decoration: const InputDecoration(
+                    labelText: 'Kullanıcı Adı / E-posta',
+                    prefixIcon: Icon(Icons.person_outline),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: credIdController,
+                  decoration: const InputDecoration(
+                    labelText: 'Kimlik ID (Credential ID - İsteğe bağlı)',
+                    hintText: 'Boş bırakılırsa otomatik üretilir',
+                    prefixIcon: Icon(Icons.key),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('İptal'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final rpId = rpController.text.trim();
+                if (rpId.isEmpty) return;
+                final rawCredId = credIdController.text.trim();
+                final credId = rawCredId.isNotEmpty
+                    ? rawCredId
+                    : base64UrlEncode(
+                        List<int>.generate(16, (_) => Random.secure().nextInt(256)),
+                      );
+                final userName = userController.text.trim();
+
+                final newPasskey = VaultPasskey(
+                  id: const Uuid().v4(),
+                  credentialId: credId,
+                  rpId: rpId,
+                  rpName: rpId,
+                  userName: userName,
+                  createdAt: DateTime.now().toUtc(),
+                );
+
+                setState(() {
+                  _passkeys.add(newPasskey);
+                });
+                Navigator.pop(ctx);
+              },
+              child: const Text('Ekle'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Future<void> _pickReminderDate() async {
     final now = DateTime.now();
     final picked = await showDatePicker(
@@ -327,6 +442,7 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
           password: newPassword,
           website: _websiteController.text.trim(),
           totpSecret: _totpController.text.trim(),
+          passkeys: _passkeys,
           content: _notesController.text.trim(),
           folderId: _folderId,
           clearFolderId: _folderId == null,
@@ -705,6 +821,111 @@ class _CredentialEditorScreenState extends State<CredentialEditorScreen> {
                     ),
                   ),
                 ],
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surfaceContainerHighest.withValues(
+                      alpha: 0.35,
+                    ),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: Colors.purpleAccent.withValues(alpha: 0.3),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.fingerprint,
+                            color: Colors.purpleAccent,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text(
+                              'Passkey (FIDO2 / WebAuthn)',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ),
+                          TextButton.icon(
+                            style: TextButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                            ),
+                            icon: const Icon(Icons.add, size: 16),
+                            label: const Text('Passkey Ekle'),
+                            onPressed: _showAddPasskeyDialog,
+                          ),
+                        ],
+                      ),
+                      if (_passkeys.isEmpty) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          'Bu hesaba bağlı bir passkey yok. "Passkey Ekle" ile ekleyebilir veya Bitwarden dışa aktarımı ile otomatik içe aktarabilirsiniz.',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: theme.hintColor,
+                          ),
+                        ),
+                      ] else ...[
+                        const SizedBox(height: 8),
+                        ..._passkeys.asMap().entries.map((entry) {
+                          final index = entry.key;
+                          final p = entry.value;
+                          return Card(
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            color: theme.colorScheme.surface,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10),
+                              side: BorderSide(
+                                color: Colors.purpleAccent.withValues(alpha: 0.2),
+                              ),
+                            ),
+                            child: ListTile(
+                              dense: true,
+                              leading: const CircleAvatar(
+                                radius: 15,
+                                backgroundColor: Color(0x22AB47BC),
+                                child: Icon(
+                                  Icons.fingerprint,
+                                  color: Colors.purpleAccent,
+                                  size: 18,
+                                ),
+                              ),
+                              title: Text(
+                                p.rpId,
+                                style: const TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                              subtitle: Text(
+                                'Kullanıcı: ${p.userName.isNotEmpty ? p.userName : (_usernameController.text.isNotEmpty ? _usernameController.text : "Belirtilmemiş")}\nID: ${p.credentialId.length > 24 ? "${p.credentialId.substring(0, 24)}..." : p.credentialId}',
+                                style: const TextStyle(fontSize: 11),
+                              ),
+                              trailing: IconButton(
+                                icon: const Icon(
+                                  Icons.delete_outline,
+                                  color: Colors.redAccent,
+                                  size: 20,
+                                ),
+                                tooltip: 'Passkey\'i Kaldır',
+                                onPressed: () {
+                                  setState(() {
+                                    _passkeys.removeAt(index);
+                                  });
+                                },
+                              ),
+                            ),
+                          );
+                        }),
+                      ],
+                    ],
+                  ),
+                ),
                 const SizedBox(height: 20),
                 Container(
                   padding: const EdgeInsets.all(14),

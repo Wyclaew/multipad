@@ -6,7 +6,7 @@ import '../models/vault_folder.dart';
 import '../models/vault_item.dart';
 import '../providers/auth_provider.dart';
 import '../providers/vault_provider.dart';
-import '../services/audit_service.dart';
+import '../widgets/credential_detail_pane.dart';
 import '../widgets/quick_search_dialog.dart';
 import '../widgets/vault_item_card.dart';
 import 'audit_screen.dart';
@@ -33,6 +33,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final _searchCtrl = TextEditingController();
   final _scaffoldKey = GlobalKey<ScaffoldState>();
+  String? _selectedItemId;
 
   @override
   void initState() {
@@ -60,6 +61,10 @@ class _HomeScreenState extends State<HomeScreen> {
         screen = NoteEditorScreen(initialItem: item);
         break;
       case VaultItemType.credential:
+      case VaultItemType.bankAccount:
+      case VaultItemType.server:
+      case VaultItemType.database:
+      case VaultItemType.cryptoWallet:
         screen = CredentialEditorScreen(initialItem: item);
         break;
       case VaultItemType.card:
@@ -91,6 +96,10 @@ class _HomeScreenState extends State<HomeScreen> {
         screen = NoteEditorScreen(initialFolderId: folderId);
         break;
       case VaultItemType.credential:
+      case VaultItemType.bankAccount:
+      case VaultItemType.server:
+      case VaultItemType.database:
+      case VaultItemType.cryptoWallet:
         screen = CredentialEditorScreen(initialFolderId: folderId);
         break;
       case VaultItemType.card:
@@ -243,6 +252,70 @@ class _HomeScreenState extends State<HomeScreen> {
                   Navigator.pop(ctx);
                   _createNewItem(
                     VaultItemType.secret,
+                    folderId: selectedFolderId,
+                  );
+                },
+              ),
+              _AddTile(
+                icon: Icons.account_balance_outlined,
+                color: Colors.blueGrey,
+                title: l10n.tr('Banka Hesabı', 'Bank Account'),
+                subtitle: l10n.tr(
+                  'IBAN (ISO 7064 mod-97), hesap no ve şube kodu',
+                  'IBAN (ISO 7064 mod-97), account number & branch',
+                ),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _createNewItem(
+                    VaultItemType.bankAccount,
+                    folderId: selectedFolderId,
+                  );
+                },
+              ),
+              _AddTile(
+                icon: Icons.dns_outlined,
+                color: Colors.purple,
+                title: l10n.tr('Sunucu / SSH', 'Server / SSH'),
+                subtitle: l10n.tr(
+                  'Host, IP, port, kullanıcı ve SSH anahtarı',
+                  'Host, IP, port, username & SSH private key',
+                ),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _createNewItem(
+                    VaultItemType.server,
+                    folderId: selectedFolderId,
+                  );
+                },
+              ),
+              _AddTile(
+                icon: Icons.storage_outlined,
+                color: Colors.brown,
+                title: l10n.tr('Veritabanı', 'Database'),
+                subtitle: l10n.tr(
+                  'PostgreSQL, MySQL, MongoDB bağlantı bilgileri',
+                  'PostgreSQL, MySQL, MongoDB connection details',
+                ),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _createNewItem(
+                    VaultItemType.database,
+                    folderId: selectedFolderId,
+                  );
+                },
+              ),
+              _AddTile(
+                icon: Icons.currency_bitcoin_rounded,
+                color: Colors.amber.shade800,
+                title: l10n.tr('Kripto Cüzdan', 'Crypto Wallet'),
+                subtitle: l10n.tr(
+                  'Mnemonic kurtarma kelimeleri ve cüzdan adresi',
+                  'Seed recovery phrase & wallet address',
+                ),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _createNewItem(
+                    VaultItemType.cryptoWallet,
                     folderId: selectedFolderId,
                   );
                 },
@@ -510,6 +583,14 @@ class _HomeScreenState extends State<HomeScreen> {
           return items.where((i) => i.type == VaultItemType.identity).length;
         case VaultCategoryFilter.license:
           return items.where((i) => i.type == VaultItemType.license).length;
+        case VaultCategoryFilter.bankAccounts:
+          return items.where((i) => i.type == VaultItemType.bankAccount).length;
+        case VaultCategoryFilter.servers:
+          return items.where((i) => i.type == VaultItemType.server).length;
+        case VaultCategoryFilter.databases:
+          return items.where((i) => i.type == VaultItemType.database).length;
+        case VaultCategoryFilter.cryptoWallets:
+          return items.where((i) => i.type == VaultItemType.cryptoWallet).length;
         case VaultCategoryFilter.favorites:
           return items.where((i) => i.isFavorite).length;
         case VaultCategoryFilter.trash:
@@ -689,6 +770,34 @@ class _HomeScreenState extends State<HomeScreen> {
           onTap: () => selectCategory(VaultCategoryFilter.secrets),
         ),
         _SidebarCategoryTile(
+          icon: Icons.account_balance_outlined,
+          label: l10n.tr('Banka Hesapları', 'Bank Accounts'),
+          count: countFor(VaultCategoryFilter.bankAccounts),
+          selected: vault.currentCategory == VaultCategoryFilter.bankAccounts,
+          onTap: () => selectCategory(VaultCategoryFilter.bankAccounts),
+        ),
+        _SidebarCategoryTile(
+          icon: Icons.dns_outlined,
+          label: l10n.tr('Sunucular & SSH', 'Servers & SSH'),
+          count: countFor(VaultCategoryFilter.servers),
+          selected: vault.currentCategory == VaultCategoryFilter.servers,
+          onTap: () => selectCategory(VaultCategoryFilter.servers),
+        ),
+        _SidebarCategoryTile(
+          icon: Icons.storage_outlined,
+          label: l10n.tr('Veritabanları', 'Databases'),
+          count: countFor(VaultCategoryFilter.databases),
+          selected: vault.currentCategory == VaultCategoryFilter.databases,
+          onTap: () => selectCategory(VaultCategoryFilter.databases),
+        ),
+        _SidebarCategoryTile(
+          icon: Icons.currency_bitcoin_rounded,
+          label: l10n.tr('Kripto Cüzdanlar', 'Crypto Wallets'),
+          count: countFor(VaultCategoryFilter.cryptoWallets),
+          selected: vault.currentCategory == VaultCategoryFilter.cryptoWallets,
+          onTap: () => selectCategory(VaultCategoryFilter.cryptoWallets),
+        ),
+        _SidebarCategoryTile(
           icon: Icons.delete_outline,
           label: l10n.trash,
           count: countFor(VaultCategoryFilter.trash),
@@ -769,9 +878,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final vault = context.watch<VaultProvider>();
     final theme = Theme.of(context);
 
-    final auditReport = AuditService.analyzeVault(
-      vault.items,
-      globalExpiryDays: auth.globalPasswordExpiryDays,
+    final auditReport = vault.getAuditReport(
+      expiryDays: auth.globalPasswordExpiryDays,
     );
 
     final folderName = vault.selectedFolderId == null
@@ -782,10 +890,20 @@ class _HomeScreenState extends State<HomeScreen> {
             .firstOrNull;
 
     final filtered = vault.filteredItems;
+    final VaultItem? selectedItem;
+    if (filtered.isEmpty) {
+      selectedItem = null;
+    } else if (_selectedItemId != null &&
+        filtered.any((item) => item.id == _selectedItemId)) {
+      selectedItem = filtered.firstWhere((item) => item.id == _selectedItemId);
+    } else {
+      selectedItem = filtered.first;
+    }
 
     return LayoutBuilder(
       builder: (context, constraints) {
         final isWide = constraints.maxWidth >= 780;
+        final is3Pane = constraints.maxWidth >= 1000;
 
         return Scaffold(
           key: _scaffoldKey,
@@ -967,233 +1085,353 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ],
                 ),
-          body: Row(
-            children: [
-              if (isWide)
-                Container(
-                  width: 256,
-                  decoration: BoxDecoration(
-                    border: Border(
-                      right: BorderSide(
-                        color: theme.colorScheme.outlineVariant,
+          body: Builder(
+            builder: (context) {
+              final listPaneContent = Column(
+                children: [
+                  if (vault.hasConflicts)
+                    MaterialBanner(
+                      backgroundColor: Colors.orange.withValues(alpha: 0.14),
+                      leading: const Icon(
+                        Icons.merge_type,
+                        color: Colors.orangeAccent,
                       ),
-                    ),
-                  ),
-                  child: _buildSidebarContent(
-                    vault,
-                    closeDrawerOnSelect: false,
-                  ),
-                ),
-              Expanded(
-                child: Column(
-                  children: [
-                    if (vault.hasConflicts)
-                      MaterialBanner(
-                        backgroundColor: Colors.orange.withValues(alpha: 0.14),
-                        leading: const Icon(
-                          Icons.merge_type,
-                          color: Colors.orangeAccent,
+                      content: Text(
+                        l10n.tr(
+                          '${vault.conflicts.length} senkronizasyon çakışması bulundu. Veri kaybını önlemek için inceleyin.',
+                          '${vault.conflicts.length} sync conflict(s) detected. Review to avoid losing edits.',
                         ),
-                        content: Text(
-                          l10n.tr(
-                            '${vault.conflicts.length} senkronizasyon çakışması bulundu. Veri kaybını önlemek için inceleyin.',
-                            '${vault.conflicts.length} sync conflict(s) detected. Review to avoid losing edits.',
-                          ),
-                        ),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.of(context).push(
-                              MaterialPageRoute(
-                                builder: (_) => const ConflictsScreen(),
-                              ),
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => const ConflictsScreen(),
                             ),
-                            child: Text(l10n.tr('Çöz', 'Resolve')),
                           ),
-                        ],
-                      ),
-
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
-                      child: TextField(
-                        controller: _searchCtrl,
-                        onChanged: vault.setSearchQuery,
-                        decoration: InputDecoration(
-                          hintText: l10n.search,
-                          prefixIcon: const Icon(Icons.search),
-                          suffixIcon: _searchCtrl.text.isNotEmpty
-                              ? IconButton(
-                                  icon: const Icon(Icons.clear),
-                                  onPressed: () {
-                                    _searchCtrl.clear();
-                                    vault.setSearchQuery('');
-                                  },
-                                )
-                              : null,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          isDense: true,
+                          child: Text(l10n.tr('Çöz', 'Resolve')),
                         ),
-                      ),
+                      ],
                     ),
 
-                    if (!isWide)
-                      SizedBox(
-                        height: 44,
-                        child: ListView(
-                          scrollDirection: Axis.horizontal,
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          children: [
-                            _CategoryChip(
-                              label: l10n.catAll,
-                              selected:
-                                  vault.currentCategory ==
-                                  VaultCategoryFilter.all,
-                              onTap: () =>
-                                  vault.setCategory(VaultCategoryFilter.all),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _searchCtrl,
+                            onChanged: vault.setSearchQuery,
+                            decoration: InputDecoration(
+                              hintText: l10n.search,
+                              prefixIcon: const Icon(Icons.search),
+                              suffixIcon: _searchCtrl.text.isNotEmpty
+                                  ? IconButton(
+                                      icon: const Icon(Icons.clear),
+                                      onPressed: () {
+                                        _searchCtrl.clear();
+                                        vault.setSearchQuery('');
+                                      },
+                                    )
+                                  : null,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              isDense: true,
                             ),
-                            _CategoryChip(
-                              label: l10n.catCredentials,
-                              selected:
-                                  vault.currentCategory ==
-                                  VaultCategoryFilter.credentials,
-                              onTap: () => vault.setCategory(
-                                VaultCategoryFilter.credentials,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        PopupMenuButton<VaultSortOrder>(
+                          tooltip: l10n.tr('Sırala', 'Sort'),
+                          icon: const Icon(Icons.sort_rounded),
+                          initialValue: vault.sortOrder,
+                          onSelected: (order) => vault.setSortOrder(order),
+                          itemBuilder: (ctx) => [
+                            PopupMenuItem(
+                              value: VaultSortOrder.az,
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.sort_by_alpha, size: 18),
+                                  const SizedBox(width: 8),
+                                  Text(l10n.tr('İsim (A-Z)', 'Title (A-Z)')),
+                                ],
                               ),
                             ),
-                            _CategoryChip(
-                              label: l10n.catNotes,
-                              selected:
-                                  vault.currentCategory ==
-                                  VaultCategoryFilter.notes,
-                              onTap: () =>
-                                  vault.setCategory(VaultCategoryFilter.notes),
-                            ),
-                            _CategoryChip(
-                              label: l10n.catCards,
-                              selected:
-                                  vault.currentCategory ==
-                                  VaultCategoryFilter.cards,
-                              onTap: () =>
-                                  vault.setCategory(VaultCategoryFilter.cards),
-                            ),
-                            _CategoryChip(
-                              label: l10n.catWifi,
-                              selected:
-                                  vault.currentCategory ==
-                                  VaultCategoryFilter.wifi,
-                              onTap: () =>
-                                  vault.setCategory(VaultCategoryFilter.wifi),
-                            ),
-                            _CategoryChip(
-                              label: l10n.catIdentity,
-                              selected:
-                                  vault.currentCategory ==
-                                  VaultCategoryFilter.identity,
-                              onTap: () => vault.setCategory(
-                                VaultCategoryFilter.identity,
+                            PopupMenuItem(
+                              value: VaultSortOrder.za,
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.sort_by_alpha, size: 18),
+                                  const SizedBox(width: 8),
+                                  Text(l10n.tr('İsim (Z-A)', 'Title (Z-A)')),
+                                ],
                               ),
                             ),
-                            _CategoryChip(
-                              label: l10n.catLicense,
-                              selected:
-                                  vault.currentCategory ==
-                                  VaultCategoryFilter.license,
-                              onTap: () => vault.setCategory(
-                                VaultCategoryFilter.license,
-                              ),
-                            ),
-                            _CategoryChip(
-                              label: l10n.catSecrets,
-                              selected:
-                                  vault.currentCategory ==
-                                  VaultCategoryFilter.secrets,
-                              onTap: () => vault.setCategory(
-                                VaultCategoryFilter.secrets,
-                              ),
-                            ),
-                            _CategoryChip(
-                              label: l10n.catFavorites,
-                              selected:
-                                  vault.currentCategory ==
-                                  VaultCategoryFilter.favorites,
-                              onTap: () => vault.setCategory(
-                                VaultCategoryFilter.favorites,
+                            PopupMenuItem(
+                              value: VaultSortOrder.recentlyUpdated,
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.update, size: 18),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    l10n.tr(
+                                      'Son Güncellenen',
+                                      'Recently Updated',
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ],
                         ),
-                      ),
-
-                    Expanded(
-                      child: vault.isLoading && filtered.isEmpty
-                          ? const Center(child: CircularProgressIndicator())
-                          : filtered.isEmpty
-                              ? Center(
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(32),
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          Icons.lock_open_rounded,
-                                          size: 56,
-                                          color: theme.colorScheme.outline,
-                                        ),
-                                        const SizedBox(height: 12),
-                                        Text(
-                                          l10n.tr(
-                                            'Bu görünümde henüz öğe yok.',
-                                            'No items in this view yet.',
-                                          ),
-                                          style: theme.textTheme.titleMedium,
-                                        ),
-                                        const SizedBox(height: 6),
-                                        Text(
-                                          l10n.tr(
-                                            'Sağ alttaki + düğmesiyle yeni not, parola, Wi-Fi veya kimlik ekleyin.',
-                                            'Tap + below to add a note, password, Wi-Fi or ID card.',
-                                          ),
-                                          textAlign: TextAlign.center,
-                                          style: theme.textTheme.bodySmall,
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                )
-                              : ListView.builder(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    12,
-                                    6,
-                                    12,
-                                    88,
-                                  ),
-                                  itemCount: filtered.length,
-                                  itemBuilder: (ctx, idx) {
-                                    final item = filtered[idx];
-                                    final isSelected = vault.selectedItemIds
-                                        .contains(item.id);
-                                    return VaultItemCard(
-                                      item: item,
-                                      isSelectionMode: vault.isSelectionMode,
-                                      isSelected: isSelected,
-                                      onLongPress: () =>
-                                          vault.enterSelectionMode(item.id),
-                                      onTap: () {
-                                        if (vault.isSelectionMode) {
-                                          vault.toggleSelection(item.id);
-                                        } else {
-                                          _openEditor(item);
-                                        }
-                                      },
-                                    );
-                                  },
-                                ),
+                      ],
                     ),
-                  ],
-                ),
-              ),
-            ],
+                  ),
+
+                  if (!isWide)
+                    SizedBox(
+                      height: 44,
+                      child: ListView(
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        children: [
+                          _CategoryChip(
+                            label: l10n.catAll,
+                            selected:
+                                vault.currentCategory == VaultCategoryFilter.all,
+                            onTap: () =>
+                                vault.setCategory(VaultCategoryFilter.all),
+                          ),
+                          _CategoryChip(
+                            label: l10n.catCredentials,
+                            selected: vault.currentCategory ==
+                                VaultCategoryFilter.credentials,
+                            onTap: () => vault.setCategory(
+                              VaultCategoryFilter.credentials,
+                            ),
+                          ),
+                          _CategoryChip(
+                            label: l10n.catNotes,
+                            selected:
+                                vault.currentCategory == VaultCategoryFilter.notes,
+                            onTap: () =>
+                                vault.setCategory(VaultCategoryFilter.notes),
+                          ),
+                          _CategoryChip(
+                            label: l10n.catCards,
+                            selected:
+                                vault.currentCategory == VaultCategoryFilter.cards,
+                            onTap: () =>
+                                vault.setCategory(VaultCategoryFilter.cards),
+                          ),
+                          _CategoryChip(
+                            label: l10n.tr('Banka', 'Bank'),
+                            selected: vault.currentCategory ==
+                                VaultCategoryFilter.bankAccounts,
+                            onTap: () => vault.setCategory(
+                              VaultCategoryFilter.bankAccounts,
+                            ),
+                          ),
+                          _CategoryChip(
+                            label: l10n.tr('Sunucu', 'Server'),
+                            selected: vault.currentCategory ==
+                                VaultCategoryFilter.servers,
+                            onTap: () => vault.setCategory(
+                              VaultCategoryFilter.servers,
+                            ),
+                          ),
+                          _CategoryChip(
+                            label: l10n.tr('Veritabanı', 'Database'),
+                            selected: vault.currentCategory ==
+                                VaultCategoryFilter.databases,
+                            onTap: () => vault.setCategory(
+                              VaultCategoryFilter.databases,
+                            ),
+                          ),
+                          _CategoryChip(
+                            label: l10n.tr('Kripto', 'Crypto'),
+                            selected: vault.currentCategory ==
+                                VaultCategoryFilter.cryptoWallets,
+                            onTap: () => vault.setCategory(
+                              VaultCategoryFilter.cryptoWallets,
+                            ),
+                          ),
+                          _CategoryChip(
+                            label: l10n.catWifi,
+                            selected:
+                                vault.currentCategory == VaultCategoryFilter.wifi,
+                            onTap: () =>
+                                vault.setCategory(VaultCategoryFilter.wifi),
+                          ),
+                          _CategoryChip(
+                            label: l10n.catIdentity,
+                            selected: vault.currentCategory ==
+                                VaultCategoryFilter.identity,
+                            onTap: () => vault.setCategory(
+                              VaultCategoryFilter.identity,
+                            ),
+                          ),
+                          _CategoryChip(
+                            label: l10n.catLicense,
+                            selected: vault.currentCategory ==
+                                VaultCategoryFilter.license,
+                            onTap: () => vault.setCategory(
+                              VaultCategoryFilter.license,
+                            ),
+                          ),
+                          _CategoryChip(
+                            label: l10n.catSecrets,
+                            selected: vault.currentCategory ==
+                                VaultCategoryFilter.secrets,
+                            onTap: () => vault.setCategory(
+                              VaultCategoryFilter.secrets,
+                            ),
+                          ),
+                          _CategoryChip(
+                            label: l10n.catFavorites,
+                            selected: vault.currentCategory ==
+                                VaultCategoryFilter.favorites,
+                            onTap: () => vault.setCategory(
+                              VaultCategoryFilter.favorites,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  Expanded(
+                    child: vault.isLoading && filtered.isEmpty
+                        ? const Center(child: CircularProgressIndicator())
+                        : filtered.isEmpty
+                            ? Center(
+                                child: Padding(
+                                  padding: const EdgeInsets.all(32),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        Icons.lock_open_rounded,
+                                        size: 56,
+                                        color: theme.colorScheme.outline,
+                                      ),
+                                      const SizedBox(height: 12),
+                                      Text(
+                                        l10n.tr(
+                                          'Bu görünümde henüz öğe yok.',
+                                          'No items in this view yet.',
+                                        ),
+                                        style: theme.textTheme.titleMedium,
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        l10n.tr(
+                                          'Sağ alttaki + düğmesiyle yeni not, parola, Wi-Fi veya kimlik ekleyin.',
+                                          'Tap + below to add a note, password, Wi-Fi or ID card.',
+                                        ),
+                                        textAlign: TextAlign.center,
+                                        style: theme.textTheme.bodySmall,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              )
+                            : ListView.builder(
+                                padding: const EdgeInsets.fromLTRB(
+                                  12,
+                                  6,
+                                  12,
+                                  88,
+                                ),
+                                itemCount: filtered.length,
+                                itemBuilder: (ctx, idx) {
+                                  final item = filtered[idx];
+                                  final isSelected = vault.isSelectionMode
+                                      ? vault.selectedItemIds.contains(item.id)
+                                      : (is3Pane && selectedItem?.id == item.id);
+                                  return VaultItemCard(
+                                    item: item,
+                                    isSelectionMode: vault.isSelectionMode,
+                                    isSelected: isSelected,
+                                    onLongPress: () =>
+                                        vault.enterSelectionMode(item.id),
+                                    onTap: () {
+                                      if (vault.isSelectionMode) {
+                                        vault.toggleSelection(item.id);
+                                      } else if (is3Pane) {
+                                        setState(() {
+                                          _selectedItemId = item.id;
+                                        });
+                                      } else {
+                                        _openEditor(item);
+                                      }
+                                    },
+                                  );
+                                },
+                              ),
+                  ),
+                ],
+              );
+
+              return Row(
+                children: [
+                  if (isWide)
+                    Container(
+                      width: 256,
+                      decoration: BoxDecoration(
+                        border: Border(
+                          right: BorderSide(
+                            color: theme.colorScheme.outlineVariant,
+                          ),
+                        ),
+                      ),
+                      child: _buildSidebarContent(
+                        vault,
+                        closeDrawerOnSelect: false,
+                      ),
+                    ),
+                  is3Pane
+                      ? Container(
+                          width: 340,
+                          decoration: BoxDecoration(
+                            border: Border(
+                              right: BorderSide(
+                                color: theme.colorScheme.outlineVariant,
+                              ),
+                            ),
+                          ),
+                          child: listPaneContent,
+                        )
+                      : Expanded(
+                          child: listPaneContent,
+                        ),
+                  if (is3Pane)
+                    Expanded(
+                      child: () {
+                        final active = selectedItem;
+                        if (active == null) {
+                          return Center(
+                            child: Text(
+                              l10n.tr(
+                                'Ayrıntıları görüntülemek için bir öğe seçin',
+                                'Select an item to view details',
+                              ),
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                color: theme.colorScheme.outline,
+                              ),
+                            ),
+                          );
+                        }
+                        return CredentialDetailPane(
+                          item: active,
+                          onEdit: () => _openEditor(active),
+                          onToggleFavorite: () => vault.toggleFavorite(active),
+                        );
+                      }(),
+                    ),
+                ],
+              );
+            },
           ),
           floatingActionButton: vault.isSelectionMode
               ? null

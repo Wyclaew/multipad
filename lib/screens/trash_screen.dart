@@ -21,6 +21,14 @@ class TrashScreen extends StatelessWidget {
         return Icons.badge_outlined;
       case VaultItemType.license:
         return Icons.verified_user_outlined;
+      case VaultItemType.bankAccount:
+        return Icons.account_balance;
+      case VaultItemType.server:
+        return Icons.dns;
+      case VaultItemType.database:
+        return Icons.storage;
+      case VaultItemType.cryptoWallet:
+        return Icons.account_balance_wallet;
       case VaultItemType.note:
       case VaultItemType.folder:
         return Icons.description_outlined;

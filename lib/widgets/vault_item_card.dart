@@ -11,6 +11,7 @@ import '../providers/vault_provider.dart';
 import '../services/audit_service.dart';
 import '../services/clipboard_service.dart';
 import '../services/totp_service.dart';
+import '../services/totp_ticker_service.dart';
 
 class VaultItemCard extends StatefulWidget {
   final VaultItem item;
@@ -33,7 +34,7 @@ class VaultItemCard extends StatefulWidget {
 }
 
 class _VaultItemCardState extends State<VaultItemCard> {
-  Timer? _totpTimer;
+  StreamSubscription<int>? _totpSubscription;
   String? _currentTotp;
   int _remainingSeconds = 30;
   int _periodSeconds = 30;
@@ -48,7 +49,8 @@ class _VaultItemCardState extends State<VaultItemCard> {
   void didUpdateWidget(covariant VaultItemCard oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.item.totpSecret != widget.item.totpSecret) {
-      _totpTimer?.cancel();
+      _totpSubscription?.cancel();
+      _totpSubscription = null;
       _currentTotp = null;
       _initTotp();
     }
@@ -58,10 +60,10 @@ class _VaultItemCardState extends State<VaultItemCard> {
     if (widget.item.type == VaultItemType.credential &&
         widget.item.totpSecret.trim().isNotEmpty) {
       _updateTotp();
-      _totpTimer = Timer.periodic(
-        const Duration(seconds: 1),
-        (_) => _updateTotp(),
-      );
+      _totpSubscription?.cancel();
+      _totpSubscription = TotpTickerService.instance.subscribe((_) {
+        _updateTotp();
+      });
     }
   }
 
@@ -77,7 +79,8 @@ class _VaultItemCardState extends State<VaultItemCard> {
 
   @override
   void dispose() {
-    _totpTimer?.cancel();
+    _totpSubscription?.cancel();
+    _totpSubscription = null;
     super.dispose();
   }
 
@@ -153,6 +156,14 @@ class _VaultItemCardState extends State<VaultItemCard> {
         return Icons.badge_outlined;
       case VaultItemType.license:
         return Icons.verified_user_outlined;
+      case VaultItemType.bankAccount:
+        return Icons.account_balance;
+      case VaultItemType.server:
+        return Icons.dns;
+      case VaultItemType.database:
+        return Icons.storage;
+      case VaultItemType.cryptoWallet:
+        return Icons.account_balance_wallet;
       case VaultItemType.note:
       case VaultItemType.folder:
         return Icons.description_outlined;
@@ -173,6 +184,14 @@ class _VaultItemCardState extends State<VaultItemCard> {
         return Colors.orangeAccent;
       case VaultItemType.license:
         return Colors.greenAccent.shade700;
+      case VaultItemType.bankAccount:
+        return Colors.tealAccent.shade400;
+      case VaultItemType.server:
+        return Colors.blueGrey;
+      case VaultItemType.database:
+        return Colors.cyanAccent.shade700;
+      case VaultItemType.cryptoWallet:
+        return Colors.amberAccent.shade400;
       case VaultItemType.note:
       case VaultItemType.folder:
         return Colors.amberAccent.shade700;
@@ -182,13 +201,19 @@ class _VaultItemCardState extends State<VaultItemCard> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final vault = context.read<VaultProvider>();
-    final auth = context.watch<AuthProvider>();
+    VaultProvider? vault;
+    try {
+      vault = context.read<VaultProvider>();
+    } catch (_) {}
+    AuthProvider? auth;
+    try {
+      auth = context.watch<AuthProvider>();
+    } catch (_) {}
     final item = widget.item;
 
     final isExpiring = _isPasswordExpiringSoon(
       item,
-      auth.globalPasswordExpiryDays,
+      auth?.globalPasswordExpiryDays ?? 90,
     );
     final icon = _iconForType(item.type);
     final typeColor = _colorForType(item.type);
@@ -391,7 +416,7 @@ class _VaultItemCardState extends State<VaultItemCard> {
                         color: item.isFavorite ? Colors.amber : theme.hintColor,
                         size: 20,
                       ),
-                      onPressed: () => vault.toggleFavorite(item),
+                      onPressed: () => vault?.toggleFavorite(item),
                     ),
                   ],
                 ],
@@ -455,12 +480,48 @@ class _VaultItemCardState extends State<VaultItemCard> {
               ],
               if (item.tags.isNotEmpty ||
                   item.attachments.isNotEmpty ||
-                  item.customFields.isNotEmpty) ...[
+                  item.customFields.isNotEmpty ||
+                  item.hasPasskeys) ...[
                 const SizedBox(height: 10),
                 Wrap(
                   spacing: 6,
                   runSpacing: 4,
                   children: [
+                    if (item.hasPasskeys)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.purpleAccent.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: Colors.purpleAccent.withValues(alpha: 0.3),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.fingerprint,
+                              size: 13,
+                              color: Colors.purpleAccent,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              item.passkeys.length == 1
+                                  ? 'Passkey'
+                                  : 'Passkey (${item.passkeys.length})',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.purpleAccent,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ...item.tags.map(
                       (tag) => Container(
                         padding: const EdgeInsets.symmetric(

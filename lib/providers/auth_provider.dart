@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
+import 'package:crypto/crypto.dart' as crypto_pkg;
+import 'package:flutter/widgets.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -11,6 +13,7 @@ import '../services/offline_storage_service.dart';
 import '../services/pairing_service.dart';
 import '../services/security_log_service.dart';
 import '../services/supabase_service.dart';
+import '../services/totp_ticker_service.dart';
 
 enum VaultLockStatus {
   needsSetup,
@@ -20,14 +23,27 @@ enum VaultLockStatus {
 }
 
 class AuthProvider with ChangeNotifier {
-  final CryptoService _cryptoService = CryptoService();
-  final SupabaseService _supabaseService = SupabaseService();
-  final BiometricService _biometricService = BiometricService();
-  final SecurityLogService _securityLogService = SecurityLogService();
-  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
-    mOptions: MacOsOptions(useDataProtectionKeyChain: false),
-  );
+  final CryptoService _cryptoService;
+  final SupabaseService _supabaseService;
+  final BiometricService _biometricService;
+  final SecurityLogService _securityLogService;
+  final FlutterSecureStorage _secureStorage;
+
+  AuthProvider({
+    CryptoService? cryptoService,
+    SupabaseService? supabaseService,
+    BiometricService? biometricService,
+    SecurityLogService? securityLogService,
+    FlutterSecureStorage? secureStorage,
+  })  : _cryptoService = cryptoService ?? CryptoService(),
+        _supabaseService = supabaseService ?? SupabaseService(),
+        _biometricService = biometricService ?? BiometricService(),
+        _securityLogService = securityLogService ?? SecurityLogService(),
+        _secureStorage = secureStorage ??
+            const FlutterSecureStorage(
+              aOptions: AndroidOptions(encryptedSharedPreferences: true),
+              mOptions: MacOsOptions(useDataProtectionKeyChain: false),
+            );
 
   VaultLockStatus _status = VaultLockStatus.needsSetup;
   List<int>? _masterKey;
@@ -41,10 +57,15 @@ class AuthProvider with ChangeNotifier {
   bool _isDuressMode = false;
   bool _preferArgon2id = true;
   bool _hasVerifiedMfa = false;
+  DateTime? _twoFactorLastVerified;
+  int _twoFactorRepromptDays = 30;
   int _globalPasswordExpiryDays = 90;
   int _failedAttempts = 0;
   DateTime? _lockoutUntil;
   int _autoLockSuppressionDepth = 0;
+  int _suppressUntilResumedCount = 0;
+  Timer? _resumeGraceTimer;
+  Timer? _resumeFallbackTimer;
   String? _errorMessage;
 
   VaultLockStatus get status => _status;
@@ -69,11 +90,95 @@ class AuthProvider with ChangeNotifier {
   bool get isArgon2idActive =>
       _currentSalt != null && CryptoService.isArgon2idSalt(_currentSalt!);
   bool get hasVerifiedMfa => _hasVerifiedMfa;
+  DateTime? get twoFactorLastVerified => _twoFactorLastVerified;
+  int get twoFactorRepromptDays => _twoFactorRepromptDays;
   int get globalPasswordExpiryDays => _globalPasswordExpiryDays;
   int get failedAttempts => _failedAttempts;
   DateTime? get lockoutUntil => _lockoutUntil;
-  bool get isAutoLockSuppressed => _autoLockSuppressionDepth > 0;
+  bool get isAutoLockSuppressed =>
+      _autoLockSuppressionDepth > 0 || _suppressUntilResumedCount > 0;
   String? get errorMessage => _errorMessage;
+
+  bool _isTwoFactorSignatureValid = true;
+  bool get isTwoFactorSignatureValid => _isTwoFactorSignatureValid;
+
+  /// Evaluates whether a Two-Factor Authentication prompt is due based on the configured interval.
+  bool isTwoFactorPromptDue({DateTime? now, int? intervalDays}) {
+    final days = intervalDays ?? _twoFactorRepromptDays;
+    if (days <= 0) return true;
+    if (_twoFactorLastVerified == null) return true;
+    if (!_isTwoFactorSignatureValid) return true; // Tampered signature forces 2FA re-prompt
+    final currentTime = now ?? DateTime.now().toUtc();
+    final difference = currentTime.difference(_twoFactorLastVerified!);
+    if (difference.isNegative) return false; // Clock skew protection
+    return difference >= Duration(days: days);
+  }
+
+  /// Saves 2FA verification timestamp into FlutterSecureStorage protected by an HMAC-SHA256 signature.
+  Future<void> saveTwoFactorVerification(DateTime timestamp) async {
+    _twoFactorLastVerified = timestamp.toUtc();
+    final iso = _twoFactorLastVerified!.toIso8601String();
+
+    final hmacKey = _masterKey ?? utf8.encode('multipad_mfa_integrity_root_key');
+    final hmac = crypto_pkg.Hmac(crypto_pkg.sha256, hmacKey);
+    final signature = base64Encode(
+      hmac.convert(utf8.encode('$iso:${_currentUserEmail ?? ""}')).bytes,
+    );
+
+    await _secureStorage.write(
+      key: AppConstants.keyTwoFactorLastVerifiedIso,
+      value: iso,
+    );
+    await _secureStorage.write(
+      key: 'multipad_2fa_hmac_signature_v1',
+      value: signature,
+    );
+    _isTwoFactorSignatureValid = true;
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(AppConstants.keyTwoFactorLastVerifiedIso, iso);
+    notifyListeners();
+  }
+
+  /// Verifies integrity of the 2FA verification timestamp using the HMAC-SHA256 signature.
+  Future<bool> verifyTwoFactorTimestampIntegrity() async {
+    final secureIso = await _secureStorage.read(key: AppConstants.keyTwoFactorLastVerifiedIso);
+    final storedSignature = await _secureStorage.read(key: 'multipad_2fa_hmac_signature_v1');
+
+    if (secureIso == null || storedSignature == null) {
+      if (_twoFactorLastVerified != null) {
+        _isTwoFactorSignatureValid = false;
+        return false;
+      }
+      _isTwoFactorSignatureValid = true;
+      return true;
+    }
+
+    if (_twoFactorLastVerified != null &&
+        secureIso != _twoFactorLastVerified!.toIso8601String()) {
+      _isTwoFactorSignatureValid = false;
+      return false;
+    }
+
+    final hmacKey = _masterKey ?? utf8.encode('multipad_mfa_integrity_root_key');
+    final hmac = crypto_pkg.Hmac(crypto_pkg.sha256, hmacKey);
+    final expectedSignature = base64Encode(
+      hmac.convert(utf8.encode('$secureIso:${_currentUserEmail ?? ""}')).bytes,
+    );
+
+    _isTwoFactorSignatureValid = CryptoService.constantTimeStringEquals(
+      storedSignature,
+      expectedSignature,
+    );
+    return _isTwoFactorSignatureValid;
+  }
+
+  @visibleForTesting
+  void setTwoFactorLastVerifiedForTesting(DateTime? timestamp, {bool signatureValid = true}) {
+    _twoFactorLastVerified = timestamp;
+    _isTwoFactorSignatureValid = signatureValid;
+    notifyListeners();
+  }
 
   Duration get remainingLockout {
     if (_lockoutUntil == null) return Duration.zero;
@@ -96,6 +201,41 @@ class AuthProvider with ChangeNotifier {
     }
   }
 
+  void beginSuppressAutoLockUntilResumed() {
+    _resumeGraceTimer?.cancel();
+    _resumeGraceTimer = null;
+    _resumeFallbackTimer?.cancel();
+    _suppressUntilResumedCount++;
+  }
+
+  void endSuppressAutoLockUntilResumed({bool immediate = false}) {
+    if (immediate) {
+      _resumeGraceTimer?.cancel();
+      _resumeGraceTimer = null;
+      _resumeFallbackTimer?.cancel();
+      _resumeFallbackTimer = null;
+      if (_suppressUntilResumedCount > 0) {
+        _suppressUntilResumedCount = 0;
+        notifyListeners();
+      }
+      return;
+    }
+    notifyAppResumed();
+  }
+
+  void notifyAppResumed() {
+    if (_suppressUntilResumedCount > 0) {
+      _resumeFallbackTimer?.cancel();
+      _resumeFallbackTimer = null;
+      _resumeGraceTimer?.cancel();
+      _resumeGraceTimer = Timer(const Duration(milliseconds: 500), () {
+        _suppressUntilResumedCount = 0;
+        _resumeGraceTimer = null;
+        notifyListeners();
+      });
+    }
+  }
+
   Future<T> runWithoutAutoLock<T>(Future<T> Function() action) async {
     beginSuppressAutoLock();
     try {
@@ -103,6 +243,44 @@ class AuthProvider with ChangeNotifier {
     } finally {
       endSuppressAutoLock();
     }
+  }
+
+  Future<T> runWithoutAutoLockUntilResumed<T>(
+    Future<T> Function() action, {
+    Duration fallbackTimeout = const Duration(minutes: 5),
+  }) async {
+    beginSuppressAutoLockUntilResumed();
+    _resumeFallbackTimer?.cancel();
+    _resumeFallbackTimer = Timer(fallbackTimeout, () {
+      if (_suppressUntilResumedCount > 0) {
+        _suppressUntilResumedCount = 0;
+        _resumeGraceTimer?.cancel();
+        _resumeGraceTimer = null;
+        notifyListeners();
+      }
+    });
+
+    try {
+      return await action();
+    } catch (_) {
+      notifyAppResumed();
+      rethrow;
+    }
+  }
+
+  @visibleForTesting
+  void setBiometricsEnabledForTesting(bool enabled) {
+    _canUseBiometrics = enabled;
+    _isBiometricEnabled = enabled;
+    _biometricDisabledDueToFailures = false;
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _resumeGraceTimer?.cancel();
+    _resumeFallbackTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadSecurityPreferences(SharedPreferences prefs) async {
@@ -118,6 +296,9 @@ class AuthProvider with ChangeNotifier {
         await _securityLogService.isBiometricTemporarilyDisabled();
     final lockoutIso = prefs.getString(AppConstants.keyLockoutUntilIso);
     _lockoutUntil = lockoutIso != null ? DateTime.tryParse(lockoutIso) : null;
+    final lastVerifiedIso = prefs.getString(AppConstants.keyTwoFactorLastVerifiedIso);
+    _twoFactorLastVerified = lastVerifiedIso != null ? DateTime.tryParse(lastVerifiedIso) : null;
+    _twoFactorRepromptDays = prefs.getInt(AppConstants.keyTwoFactorRepromptDays) ?? 30;
   }
 
   Future<void> refreshSecurityState() async {
@@ -522,7 +703,9 @@ class AuthProvider with ChangeNotifier {
       _masterKey = derivedKey;
       _isDuressMode = false;
 
-      if (onlineReachable && _supabaseService.requiresMfaVerification()) {
+      if (onlineReachable &&
+          _supabaseService.requiresMfaVerification() &&
+          isTwoFactorPromptDue()) {
         _hasVerifiedMfa = true;
         _status = VaultLockStatus.mfaRequired;
       } else {
@@ -571,7 +754,12 @@ class AuthProvider with ChangeNotifier {
         code: cleanCode,
       );
       await _securityLogService.resetFailedAttempts();
+      _twoFactorLastVerified = DateTime.now().toUtc();
       final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        AppConstants.keyTwoFactorLastVerifiedIso,
+        _twoFactorLastVerified!.toIso8601String(),
+      );
       await _loadSecurityPreferences(prefs);
 
       _hasVerifiedMfa = true;
@@ -790,7 +978,8 @@ class AuthProvider with ChangeNotifier {
       }
 
       if (SupabaseService.isInitialized &&
-          _supabaseService.requiresMfaVerification()) {
+          _supabaseService.requiresMfaVerification() &&
+          isTwoFactorPromptDue()) {
         _status = VaultLockStatus.mfaRequired;
       } else {
         _status = VaultLockStatus.unlocked;
@@ -977,7 +1166,8 @@ class AuthProvider with ChangeNotifier {
         }
 
         if (SupabaseService.isInitialized &&
-            _supabaseService.requiresMfaVerification()) {
+            _supabaseService.requiresMfaVerification() &&
+            isTwoFactorPromptDue()) {
           _status = VaultLockStatus.mfaRequired;
         } else {
           _status = VaultLockStatus.unlocked;
@@ -1109,15 +1299,17 @@ class AuthProvider with ChangeNotifier {
 
   // --- Biometrics ---
 
-  Future<bool> unlockWithBiometrics() async {
+  Future<bool> unlockWithBiometrics({bool isSilentAutoTrigger = false}) async {
     _errorMessage = null;
     if (await _checkLockoutBeforeAttempt()) {
       return false;
     }
     if (_biometricDisabledDueToFailures) {
-      _errorMessage =
-          'Üst üste hatalı denemeler nedeniyle biyometrik kilit geçici olarak devre dışı. Ana parolanızı girin.';
-      notifyListeners();
+      if (!isSilentAutoTrigger) {
+        _errorMessage =
+            'Üst üste hatalı denemeler nedeniyle biyometrik kilit geçici olarak devre dışı. Ana parolanızı girin.';
+        notifyListeners();
+      }
       return false;
     }
 
@@ -1149,7 +1341,8 @@ class AuthProvider with ChangeNotifier {
         }
 
         if (SupabaseService.isInitialized &&
-            _supabaseService.requiresMfaVerification()) {
+            _supabaseService.requiresMfaVerification() &&
+            isTwoFactorPromptDue()) {
           _status = VaultLockStatus.mfaRequired;
         } else {
           _status = VaultLockStatus.unlocked;
@@ -1161,12 +1354,16 @@ class AuthProvider with ChangeNotifier {
         notifyListeners();
         return true;
       }
-      _errorMessage = 'Biyometrik doğrulama başarısız veya iptal edildi.';
-      notifyListeners();
+      if (!isSilentAutoTrigger) {
+        _errorMessage = 'Biyometrik doğrulama başarısız veya iptal edildi.';
+        notifyListeners();
+      }
       return false;
     } catch (e) {
-      _errorMessage = 'Biyometrik kilit açılamadı.';
-      notifyListeners();
+      if (!isSilentAutoTrigger) {
+        _errorMessage = 'Biyometrik kilit açılamadı.';
+        notifyListeners();
+      }
       return false;
     }
   }
@@ -1208,6 +1405,24 @@ class AuthProvider with ChangeNotifier {
     _isDuressMode = false;
     _status = VaultLockStatus.lockedWithPass;
     _securityLogService.logEvent(SecurityEventType.vaultLocked, reason);
+
+    // Clear decoded image memory buffers (QR codes, avatars, attachments)
+    try {
+      PaintingBinding.instance.imageCache.clear();
+      PaintingBinding.instance.imageCache.clearLiveImages();
+    } catch (_) {}
+
+    // Flush native autofill index
+    NativeBridgeService.clearAutofillIndex();
+
+    // Pause centralized TOTP ticker
+    TotpTickerService.instance.pause();
+
+    // Advise runtime to clean old-generation garbage immediately
+    try {
+      WidgetsBinding.instance.handleMemoryPressure();
+    } catch (_) {}
+
     notifyListeners();
   }
 
@@ -1226,9 +1441,11 @@ class AuthProvider with ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(AppConstants.keyMasterSalt);
     await prefs.remove(AppConstants.keyCachedEmail);
+    await prefs.remove(AppConstants.keyTwoFactorLastVerifiedIso);
     _currentUserEmail = null;
     _currentSalt = null;
     _hasVerifiedMfa = false;
+    _twoFactorLastVerified = null;
 
     _status = VaultLockStatus.lockedWithPass;
     notifyListeners();

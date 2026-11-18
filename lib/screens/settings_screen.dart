@@ -1033,7 +1033,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onPressed: () async {
                 final uri = Uri.tryParse(info.htmlUrl);
                 if (uri != null) {
-                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  final auth = context.read<AuthProvider>();
+                  await auth.runWithoutAutoLockUntilResumed(
+                    () => launchUrl(uri, mode: LaunchMode.externalApplication),
+                  );
                 }
               },
               child: Text(l10n.tr('GitHub Sayfası', 'GitHub Release')),
@@ -1050,7 +1053,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         });
                         try {
                           final auth = context.read<AuthProvider>();
-                          final resultMsg = await auth.runWithoutAutoLock(
+                          final resultMsg = await auth.runWithoutAutoLockUntilResumed(
                             () => UpdateService.downloadAndInstall(
                               asset,
                               onProgress: (p) {
@@ -1131,6 +1134,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     final isDesktop =
         !kIsWeb && (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
+    final isMacOS = !kIsWeb && Platform.isMacOS;
     final isAndroid = !kIsWeb && Platform.isAndroid;
     final isCloudConnected =
         SupabaseService.isInitialized && SupabaseService.currentUser != null;
@@ -1161,12 +1165,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           SwitchListTile(
             secondary: const Icon(Icons.visibility_off_outlined),
-            title: Text(l10n.tr('Arka Plana Alınca Kilitle', 'Lock on Background')),
+            title: Text(
+              isMacOS
+                  ? l10n.tr(
+                      'Pencere Küçültüldüğünde / Gizlendiğinde Kilitle',
+                      'Lock when Window Minimized or Hidden',
+                    )
+                  : l10n.tr('Arka Plana Alınca Kilitle', 'Lock on Background'),
+            ),
             subtitle: Text(
-              l10n.tr(
-                'Uygulama simge durumuna küçültülünce kasayı kilitle',
-                'Lock vault when app leaves foreground',
-              ),
+              isMacOS
+                  ? l10n.tr(
+                      'Pencere simge durumuna küçültüldüğünde veya gizlendiğinde kasayı anında kilitle',
+                      'Immediately lock the vault when minimized or moved to background',
+                    )
+                  : l10n.tr(
+                      'Uygulama simge durumuna küçültülünce kasayı kilitle',
+                      'Lock vault when app leaves foreground',
+                    ),
             ),
             value: settings.lockOnBackground,
             onChanged: settings.setLockOnBackground,
@@ -1286,6 +1302,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onTap: () => _openDuressDialog(auth),
             ),
           ],
+
+          ListTile(
+            leading: const Icon(Icons.av_timer_outlined),
+            title: Text(l10n.tr('2FA Yeniden İsteme Sıklığı', '2FA Re-Prompt Interval')),
+            subtitle: Text(
+              l10n.tr(
+                '${settings.twoFactorRepromptDays} gün',
+                '${settings.twoFactorRepromptDays} days',
+              ),
+            ),
+            onTap: () => _showChoiceDialog<int>(
+              title: l10n.tr('2FA Sıklığı Seçin', 'Select 2FA Interval'),
+              currentValue: settings.twoFactorRepromptDays,
+              options: [
+                (value: 30, label: l10n.tr('30 gün', '30 days'), subtitle: null),
+                (value: 60, label: l10n.tr('60 gün', '60 days'), subtitle: null),
+                (value: 90, label: l10n.tr('90 gün', '90 days'), subtitle: null),
+              ],
+              onSelected: settings.setTwoFactorRepromptDays,
+            ),
+          ),
 
           if (isCloudConnected) ...[
             ListTile(
@@ -1482,7 +1519,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   'Set MultiPad as your system autofill service',
                 ),
               ),
-              onTap: NativeBridgeService.openAndroidAutofillSettings,
+              onTap: () {
+                final auth = context.read<AuthProvider>();
+                auth.runWithoutAutoLockUntilResumed(
+                  NativeBridgeService.openAndroidAutofillSettings,
+                );
+              },
             ),
           ],
 

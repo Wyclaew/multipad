@@ -134,4 +134,170 @@ void main() {
       expect(mutable, orderedEquals([0, 0, 0]));
     });
   });
+
+  group('Bitwarden KDF, Subkey derivation & CipherString Decryption', () {
+    test('hkdfExpandSha256 produces deterministic 32-byte subkeys from PRK and info', () {
+      final prk = Uint8List.fromList(List<int>.generate(32, (i) => i));
+      final encKey = CryptoService.hkdfExpandSha256(prk, 'enc', 32);
+      final macKey = CryptoService.hkdfExpandSha256(prk, 'mac', 32);
+      final encKey2 = CryptoService.hkdfExpandSha256(prk, 'enc', 32);
+
+      expect(encKey.length, 32);
+      expect(macKey.length, 32);
+      expect(CryptoService.constantTimeEquals(encKey, encKey2), isTrue);
+      expect(CryptoService.constantTimeEquals(encKey, macKey), isFalse);
+    });
+
+    test('deriveBitwardenSubKeys derives encKey and macKey via PBKDF2 and Argon2id', () async {
+      final pbkdf2Keys = await crypto.deriveBitwardenSubKeys(
+        password: 'TestPassword123!',
+        salt: 'alice@example.com',
+        kdfType: 0,
+        iterations: 1000,
+      );
+      expect(pbkdf2Keys.encKey.length, 32);
+      expect(pbkdf2Keys.macKey.length, 32);
+      expect(CryptoService.constantTimeEquals(pbkdf2Keys.encKey, pbkdf2Keys.macKey), isFalse);
+
+      final argonKeys = await crypto.deriveBitwardenSubKeys(
+        password: 'TestPassword123!',
+        salt: 'bob@example.com',
+        kdfType: 1,
+        iterations: 1,
+        memoryKib: 1024,
+        parallelism: 1,
+      );
+      expect(argonKeys.encKey.length, 32);
+      expect(argonKeys.macKey.length, 32);
+      expect(CryptoService.constantTimeEquals(argonKeys.encKey, argonKeys.macKey), isFalse);
+    });
+
+    test('encryptBitwardenCipherString and decryptBitwardenCipherString round-trip cleanly', () async {
+      final subkeys = await crypto.deriveBitwardenSubKeys(
+        password: 'ValidPassword!2026',
+        salt: 'user@domain.com',
+        iterations: 1000,
+      );
+
+      const plaintext = '{"title":"Kasa Öğesi 🔑","username":"admin","notes":"Önemli veri"}';
+      final cipherString = await crypto.encryptBitwardenCipherString(
+        plaintext: plaintext,
+        encKey: subkeys.encKey,
+        macKey: subkeys.macKey,
+      );
+
+      expect(cipherString.startsWith('2.'), isTrue);
+      final parts = cipherString.substring(2).split('|');
+      expect(parts.length, 3);
+
+      final decrypted = await crypto.decryptBitwardenCipherString(
+        cipherString: cipherString,
+        encKey: subkeys.encKey,
+        macKey: subkeys.macKey,
+      );
+      expect(decrypted, equals(plaintext));
+    });
+
+    test('decryptBitwardenCipherString detects MAC tampering and protects integrity', () async {
+      final subkeys = await crypto.deriveBitwardenSubKeys(
+        password: 'ValidPassword!2026',
+        salt: 'user@domain.com',
+        iterations: 1000,
+      );
+
+      final cipherString = await crypto.encryptBitwardenCipherString(
+        plaintext: 'Top Secret Information',
+        encKey: subkeys.encKey,
+        macKey: subkeys.macKey,
+      );
+
+      // Tamper MAC
+      final lastChar = cipherString.endsWith('A') ? 'B' : 'A';
+      final tampered = '${cipherString.substring(0, cipherString.length - 2)}$lastChar=';
+
+      await expectLater(
+        () => crypto.decryptBitwardenCipherString(
+          cipherString: tampered,
+          encKey: subkeys.encKey,
+          macKey: subkeys.macKey,
+        ),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('decryptBitwardenCipherString validates structure and throws FormatException on invalid inputs', () async {
+      final subkeys = await crypto.deriveBitwardenSubKeys(
+        password: 'Pass',
+        salt: 'salt@example.com',
+        iterations: 1000,
+      );
+
+      // Wrong type prefix (1. instead of 2.)
+      await expectLater(
+        () => crypto.decryptBitwardenCipherString(
+          cipherString: '1.aXY=|Y2lwaGVy|bWFj',
+          encKey: subkeys.encKey,
+          macKey: subkeys.macKey,
+        ),
+        throwsA(isA<FormatException>()),
+      );
+
+      // Missing mac part
+      await expectLater(
+        () => crypto.decryptBitwardenCipherString(
+          cipherString: '2.YWJjZGVmZ2hpamtsbW5vcA==|Y2lwaGVydGV4dA==',
+          encKey: subkeys.encKey,
+          macKey: subkeys.macKey,
+        ),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('decryptBitwardenJson end-to-end parses envelope and decrypts inner folders and items', () async {
+      const innerPlaintext = '''
+      {
+        "folders": [{"id": "f1", "name": "Work"}],
+        "items": [
+          {
+            "id": "i1",
+            "name": "Cloud Portal",
+            "login": {"username": "admin@work.com", "password": "SecretPass!99"}
+          }
+        ]
+      }
+      ''';
+
+      final subkeys = await crypto.deriveBitwardenSubKeys(
+        password: 'ExportPassword!2026',
+        salt: 'user@work.com',
+        iterations: 1000,
+      );
+
+      final cipher = await crypto.encryptBitwardenCipherString(
+        plaintext: innerPlaintext,
+        encKey: subkeys.encKey,
+        macKey: subkeys.macKey,
+      );
+
+      final rawExport = '''
+      {
+        "encrypted": true,
+        "passwordProtected": true,
+        "salt": "user@work.com",
+        "kdfType": 0,
+        "kdfIterations": 1000,
+        "data": "$cipher"
+      }
+      ''';
+
+      final decrypted = await crypto.decryptBitwardenJson(rawExport, 'ExportPassword!2026');
+      expect(decrypted, equals(innerPlaintext));
+
+      // Wrong password throws FormatException
+      await expectLater(
+        () => crypto.decryptBitwardenJson(rawExport, 'WrongPassword!'),
+        throwsA(isA<FormatException>()),
+      );
+    });
+  });
 }

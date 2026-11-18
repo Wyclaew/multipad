@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
@@ -9,6 +10,7 @@ import 'providers/vault_provider.dart';
 import 'screens/auth_screen.dart';
 import 'screens/home_screen.dart';
 import 'services/native_bridge_service.dart';
+import 'services/totp_ticker_service.dart';
 import 'widgets/quick_search_dialog.dart';
 
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
@@ -19,7 +21,18 @@ void main() async {
 }
 
 class MultiPadApp extends StatelessWidget {
-  const MultiPadApp({super.key});
+  final AuthProvider? authProvider;
+  final SettingsProvider? settingsProvider;
+  final VaultProvider? vaultProvider;
+  final Widget? home;
+
+  const MultiPadApp({
+    super.key,
+    this.authProvider,
+    this.settingsProvider,
+    this.vaultProvider,
+    this.home,
+  });
 
   ThemeData _buildTheme(Brightness brightness, {bool amoled = false}) {
     final isDark = brightness == Brightness.dark;
@@ -52,36 +65,73 @@ class MultiPadApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    AuthProvider? inheritedAuth = authProvider;
+    if (inheritedAuth == null) {
+      try {
+        inheritedAuth = Provider.of<AuthProvider>(context, listen: false);
+      } catch (_) {}
+    }
+
+    SettingsProvider? inheritedSettings = settingsProvider;
+    if (inheritedSettings == null) {
+      try {
+        inheritedSettings =
+            Provider.of<SettingsProvider>(context, listen: false);
+      } catch (_) {}
+    }
+
+    VaultProvider? inheritedVault = vaultProvider;
+    if (inheritedVault == null) {
+      try {
+        inheritedVault = Provider.of<VaultProvider>(context, listen: false);
+      } catch (_) {}
+    }
+
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider<SettingsProvider>(
-          create: (_) => SettingsProvider()..load(),
-        ),
-        ChangeNotifierProvider<AuthProvider>(
-          create: (_) => AuthProvider()..checkInitialState(),
-        ),
-        ChangeNotifierProxyProvider2<AuthProvider, SettingsProvider,
-            VaultProvider>(
-          create: (context) {
-            final auth = context.read<AuthProvider>();
-            final settings = context.read<SettingsProvider>();
-            return VaultProvider(
-              isUnlocked: auth.isUnlocked,
-              masterKey: auth.masterKey,
-              isDuressMode: auth.isDuressMode,
-            )..setAutofillEnabledSetting(settings.autofillEnabled);
-          },
-          update: (_, auth, settings, previous) {
-            final vault = previous ?? VaultProvider();
-            vault.setAutofillEnabledSetting(settings.autofillEnabled);
-            vault.syncAuthState(
-              isUnlocked: auth.isUnlocked,
-              masterKey: auth.masterKey,
-              isDuressMode: auth.isDuressMode,
-            );
-            return vault;
-          },
-        ),
+        if (inheritedSettings != null)
+          ChangeNotifierProvider<SettingsProvider>.value(
+            value: inheritedSettings,
+          )
+        else
+          ChangeNotifierProvider<SettingsProvider>(
+            create: (_) => SettingsProvider()..load(),
+          ),
+        if (inheritedAuth != null)
+          ChangeNotifierProvider<AuthProvider>.value(
+            value: inheritedAuth,
+          )
+        else
+          ChangeNotifierProvider<AuthProvider>(
+            create: (_) => AuthProvider()..checkInitialState(),
+          ),
+        if (inheritedVault != null)
+          ChangeNotifierProvider<VaultProvider>.value(
+            value: inheritedVault,
+          )
+        else
+          ChangeNotifierProxyProvider2<AuthProvider, SettingsProvider,
+              VaultProvider>(
+            create: (context) {
+              final auth = context.read<AuthProvider>();
+              final settings = context.read<SettingsProvider>();
+              return VaultProvider(
+                isUnlocked: auth.isUnlocked,
+                masterKey: auth.masterKey,
+                isDuressMode: auth.isDuressMode,
+              )..setAutofillEnabledSetting(settings.autofillEnabled);
+            },
+            update: (_, auth, settings, previous) {
+              final vault = previous ?? VaultProvider();
+              vault.setAutofillEnabledSetting(settings.autofillEnabled);
+              vault.syncAuthState(
+                isUnlocked: auth.isUnlocked,
+                masterKey: auth.masterKey,
+                isDuressMode: auth.isDuressMode,
+              );
+              return vault;
+            },
+          ),
       ],
       child: Consumer2<AuthProvider, SettingsProvider>(
         builder: (context, auth, settings, _) {
@@ -109,12 +159,13 @@ class MultiPadApp extends StatelessWidget {
                 data: media.copyWith(
                   textScaler: TextScaler.linear(settings.fontScale),
                 ),
-                child: _VaultLifecycleShell(
+                child: VaultLifecycleShell(
                   child: child ?? const SizedBox.shrink(),
                 ),
               );
             },
-            home: auth.isUnlocked ? const HomeScreen() : const AuthScreen(),
+            home: home ??
+                (auth.isUnlocked ? const HomeScreen() : const AuthScreen()),
           );
         },
       ),
@@ -122,15 +173,16 @@ class MultiPadApp extends StatelessWidget {
   }
 }
 
-class _VaultLifecycleShell extends StatefulWidget {
+@visibleForTesting
+class VaultLifecycleShell extends StatefulWidget {
   final Widget child;
-  const _VaultLifecycleShell({required this.child});
+  const VaultLifecycleShell({super.key, required this.child});
 
   @override
-  State<_VaultLifecycleShell> createState() => _VaultLifecycleShellState();
+  State<VaultLifecycleShell> createState() => VaultLifecycleShellState();
 }
 
-class _VaultLifecycleShellState extends State<_VaultLifecycleShell>
+class VaultLifecycleShellState extends State<VaultLifecycleShell>
     with WidgetsBindingObserver {
   Timer? _inactivityTimer;
   int _lastTimeoutMinutes = -1;
@@ -180,13 +232,12 @@ class _VaultLifecycleShellState extends State<_VaultLifecycleShell>
     if (!mounted || _quickSearchDialogOpen) return;
     final ctx = rootNavigatorKey.currentContext;
     if (ctx == null || !ctx.mounted) {
-      if (allowPostFrameRetry && mounted) {
+      if (allowPostFrameRetry && mounted && !Platform.environment.containsKey('FLUTTER_TEST')) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
             _handleQuickSearchRequested(allowPostFrameRetry: false);
           }
         });
-        WidgetsBinding.instance.ensureVisualUpdate();
       }
       return;
     }
@@ -226,6 +277,16 @@ class _VaultLifecycleShellState extends State<_VaultLifecycleShell>
     if (!mounted) return;
     final auth = context.read<AuthProvider>();
     final settings = context.read<SettingsProvider>();
+
+    if (state == AppLifecycleState.resumed) {
+      TotpTickerService.instance.resume();
+      auth.notifyAppResumed();
+      _resetInactivityTimer();
+    } else if (state == AppLifecycleState.paused ||
+               state == AppLifecycleState.hidden) {
+      TotpTickerService.instance.pause();
+    }
+
     // Only lock on true backgrounding (paused / hidden), NOT inactive (OS prompts/sheets).
     if ((state == AppLifecycleState.paused ||
             state == AppLifecycleState.hidden) &&

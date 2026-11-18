@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MultiPad</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <header class="popup-header">
+      <div class="brand">
+        <div class="brand-icon">🛡️</div>
+        <div class="brand-title">MultiPad</div>
+      </div>
+      <div id="statusBadge" class="status-badge status-offline">Offline</div>
+    </header>
+
+    <!-- Disconnected / Unpaired State -->
+    <div id="unpairedView" class="view-panel hidden">
+      <div class="empty-state">
+        <div class="empty-icon">🔗</div>
+        <h3>Pair MultiPad Desktop</h3>
+        <p>Connect this browser extension to your running MultiPad desktop application to enable autofill.</p>
+        <button id="pairBtn" class="btn btn-primary">Pair with MultiPad</button>
+      </div>
+    </div>
+
+    <!-- Locked State -->
+    <div id="lockedView" class="view-panel hidden">
+      <div class="empty-state">
+        <div class="empty-icon">🔒</div>
+        <h3>Vault is Locked</h3>
+        <p>Please unlock your MultiPad desktop vault using your Master Password or Biometrics.</p>
+        <button id="refreshLockBtn" class="btn btn-secondary">Check Again</button>
+      </div>
+    </div>
+
+    <!-- Unlocked State -->
+    <div id="unlockedView" class="view-panel">
+      <div class="search-bar">
+        <input type="text" id="searchInput" placeholder="Search vault credentials...">
+      </div>
+
+      <div class="tab-context">
+        <span class="context-label">Current Tab:</span>
+        <span id="currentDomain" class="context-domain">...</span>
+      </div>
+
+      <div id="credentialsList" class="credentials-list">
+        <!-- Rendered dynamically -->
+      </div>
+
+      <div id="noMatchesState" class="empty-state hidden">
+        <p>No matching credentials found for this site.</p>
+      </div>
+    </div>
+
+    <footer class="popup-footer">
+      <span>MultiPad v1.2.0</span>
+      <span id="portIndicator">127.0.0.1:48292</span>
+    </footer>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

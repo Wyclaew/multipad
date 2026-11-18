@@ -21,6 +21,8 @@ class AppConstants {
       'multipad_global_password_expiry_days'; // 0 = off, 30, 60, 90, 180, 365
 
   // Security & Privacy preferences
+  static const String keyTwoFactorRepromptDays = 'multipad_2fa_reprompt_days'; // 30, 60, 90 (default: 30)
+  static const String keyTwoFactorLastVerifiedIso = 'multipad_2fa_last_verified_iso';
   static const String keyAutoLockMinutes = 'multipad_auto_lock_minutes'; // 0 = off, 1, 5, 15
   static const String keyLockOnBackground = 'multipad_lock_on_background';
   static const String keyFlagSecureEnabled = 'multipad_flag_secure_enabled';

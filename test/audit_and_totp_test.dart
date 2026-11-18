@@ -1,5 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:multipad/models/vault_item.dart';
+import 'package:multipad/providers/auth_provider.dart';
+import 'package:multipad/providers/settings_provider.dart';
 import 'package:multipad/services/audit_service.dart';
 import 'package:multipad/services/totp_service.dart';
 
@@ -77,6 +79,104 @@ void main() {
       expect(report.phishingRiskCount, 1);
       expect(report.issues.any((i) => i.issueType == 'insecure_http'), isTrue);
       expect(report.overallScore, lessThan(60));
+    });
+
+    test('recalibrated health score does not penalize absence of 2FA and achieves 100 for strong passwords', () {
+      final items = [
+        VaultItem(
+          id: 'c1',
+          type: VaultItemType.credential,
+          title: 'Secure Work',
+          username: 'alice',
+          password: 'SuperStrongPass!2026#Alpha',
+          website: 'https://work.com',
+          totpSecret: '', // No 2FA
+        ),
+        VaultItem(
+          id: 'c2',
+          type: VaultItemType.credential,
+          title: 'Secure Personal',
+          username: 'bob',
+          password: 'AnotherStrongPass!2026#Beta',
+          website: 'https://personal.org',
+          totpSecret: '', // No 2FA
+        ),
+      ];
+
+      final report = AuditService.analyzeVault(items);
+      expect(report.overallScore, 100);
+      expect(report.missing2faCount, 2);
+      expect(report.issues, isEmpty);
+    });
+
+    test('missing 2FA is never classified as a vulnerability or high-severity issue in audit issues', () {
+      final items = [
+        VaultItem(
+          id: 'c1',
+          type: VaultItemType.credential,
+          title: 'No 2FA Account',
+          username: 'user',
+          password: 'CorrectHorseBatteryStaple!2026',
+          website: 'https://example.com',
+          totpSecret: '',
+        ),
+      ];
+
+      final report = AuditService.analyzeVault(items);
+      expect(report.missing2faCount, 1);
+      final hasHighSeverity2fa = report.issues.any((i) => i.issueType == 'missing_2fa' || i.severity >= 3);
+      expect(hasHighSeverity2fa, isFalse);
+      expect(report.issues.any((i) => i.issueType == 'missing_2fa'), isFalse);
+    });
+  });
+
+  group('AuthProvider & Settings 2FA Re-Prompt Interval (30, 60, 90 days)', () {
+    test('isTwoFactorPromptDue returns true when lastVerified is null', () {
+      final auth = AuthProvider();
+      expect(auth.isTwoFactorPromptDue(), isTrue);
+    });
+
+    test('evaluates 30, 60, 90 day intervals and protects against backwards clock skew', () {
+      final now = DateTime.utc(2026, 6, 1, 12, 0, 0);
+      final lastVerified = DateTime.utc(2026, 5, 20, 12, 0, 0); // 12 days ago
+
+      bool evaluateDue(DateTime? verified, int days, DateTime ref) {
+        if (days <= 0) return true;
+        if (verified == null) return true;
+        final diff = ref.difference(verified);
+        if (diff.isNegative) return false;
+        return diff >= Duration(days: days);
+      }
+
+      expect(evaluateDue(lastVerified, 30, now), isFalse);
+      expect(evaluateDue(lastVerified, 60, now), isFalse);
+      expect(evaluateDue(lastVerified, 90, now), isFalse);
+
+      // 40 days later
+      final after40Days = lastVerified.add(const Duration(days: 40));
+      expect(evaluateDue(lastVerified, 30, after40Days), isTrue);
+      expect(evaluateDue(lastVerified, 60, after40Days), isFalse);
+      expect(evaluateDue(lastVerified, 90, after40Days), isFalse);
+
+      // 70 days later
+      final after70Days = lastVerified.add(const Duration(days: 70));
+      expect(evaluateDue(lastVerified, 30, after70Days), isTrue);
+      expect(evaluateDue(lastVerified, 60, after70Days), isTrue);
+      expect(evaluateDue(lastVerified, 90, after70Days), isFalse);
+
+      // Clock skew (verified in future) -> not due
+      final futureVerified = now.add(const Duration(days: 5));
+      expect(evaluateDue(futureVerified, 30, now), isFalse);
+    });
+
+    test('settings provider defaults to 30 days and supports 30, 60, 90 presets', () {
+      final settings = SettingsProvider();
+      expect(settings.twoFactorRepromptDays, 30);
+      const presets = [30, 60, 90];
+      for (final p in presets) {
+        expect(p >= 30 && p <= 90, isTrue);
+        expect(p % 30 == 0, isTrue);
+      }
     });
   });
 

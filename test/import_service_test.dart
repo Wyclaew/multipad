@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:multipad/models/vault_item.dart';
+import 'package:multipad/services/crypto_service.dart';
 import 'package:multipad/services/import_service.dart';
 
 void main() {
@@ -108,5 +109,98 @@ void main() {
     expect(result.items.first.title, 'MyForum');
     expect(result.items.first.username, 'user42');
     expect(result.items.first.password, 'pass42!');
+  });
+
+  group('Encrypted Bitwarden JSON Import Decryption', () {
+    test('isEncryptedExport accurately detects encrypted vs unencrypted exports', () {
+      expect(ImportService.isEncryptedExport('{"encrypted": true}'), isTrue);
+      expect(ImportService.isEncryptedExport('{"passwordProtected": true}'), isTrue);
+      expect(ImportService.isEncryptedExport('{"folders": [], "items": []}'), isFalse);
+      expect(ImportService.isEncryptedExport('name,url,username,password'), isFalse);
+      expect(ImportService.isEncryptedExport(''), isFalse);
+      expect(ImportService.isEncryptedExport('not json at all'), isFalse);
+    });
+
+    test('inspectFile marks encrypted export as isEncrypted without dumping 0 items silently', () {
+      const rawEncrypted = '{"encrypted": true, "salt": "a@b.com", "data": "2.iv|cipher|mac"}';
+      final preview = ImportService.inspectFile(rawEncrypted, fileName: 'export.json');
+      expect(preview.isEncrypted, isTrue);
+      expect(preview.directParsedItems, isEmpty);
+      expect(preview.detectedFormat, ImportSourceFormat.bitwardenJson);
+    });
+
+    test('inspectFileAsync decrypts Bitwarden JSON export with valid password', () async {
+      final crypto = CryptoService();
+      const innerJson = '''
+      {
+        "folders": [{"id": "folder-1", "name": "Banking"}],
+        "items": [
+          {
+            "id": "item-1",
+            "type": 1,
+            "folderId": "folder-1",
+            "name": "Acme Bank",
+            "login": {
+              "username": "customer123",
+              "password": "BankPassword!2026",
+              "totp": "JBSWY3DPEHPK3PXP",
+              "uris": [{"uri": "https://acmebank.com"}]
+            }
+          }
+        ]
+      }
+      ''';
+
+      final subkeys = await crypto.deriveBitwardenSubKeys(
+        password: 'VaultPass!2026',
+        salt: 'alice@acme.com',
+        iterations: 1000,
+      );
+
+      final cipherString = await crypto.encryptBitwardenCipherString(
+        plaintext: innerJson,
+        encKey: subkeys.encKey,
+        macKey: subkeys.macKey,
+      );
+
+      final rawEncrypted = '''
+      {
+        "encrypted": true,
+        "passwordProtected": true,
+        "salt": "alice@acme.com",
+        "kdfType": 0,
+        "kdfIterations": 1000,
+        "data": "$cipherString"
+      }
+      ''';
+
+      // 1. Without password -> returns preview with isEncrypted: true
+      final unauthedPreview = await ImportService.inspectFileAsync(rawEncrypted);
+      expect(unauthedPreview.isEncrypted, isTrue);
+      expect(unauthedPreview.directParsedItems, isEmpty);
+
+      // 2. With correct password -> decrypts and parses folders + items
+      final authedPreview = await ImportService.inspectFileAsync(
+        rawEncrypted,
+        decryptionPassword: 'VaultPass!2026',
+      );
+      expect(authedPreview.isEncrypted, isFalse);
+      expect(authedPreview.directParsedFolders.length, 1);
+      expect(authedPreview.directParsedFolders.first.name, 'Banking');
+      expect(authedPreview.directParsedItems.length, 1);
+      expect(authedPreview.directParsedItems.first.title, 'Acme Bank');
+      expect(authedPreview.directParsedItems.first.username, 'customer123');
+      expect(authedPreview.directParsedItems.first.password, 'BankPassword!2026');
+      expect(authedPreview.directParsedItems.first.totpSecret, 'JBSWY3DPEHPK3PXP');
+
+      // 3. With wrong password -> throws FormatException
+      await expectLater(
+        () => ImportService.inspectFileAsync(
+          rawEncrypted,
+          decryptionPassword: 'WrongPassword!',
+        ),
+        throwsA(isA<FormatException>()),
+      );
+    });
   });
 }

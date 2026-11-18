@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../constants.dart';
@@ -12,14 +14,20 @@ enum AppThemePreference {
 }
 
 class SettingsProvider extends ChangeNotifier {
+  static bool get defaultLockOnBackground {
+    if (kIsWeb) return false;
+    return Platform.isAndroid || Platform.isIOS;
+  }
+
   AppThemePreference _themePreference = AppThemePreference.system;
   double _fontScale = 1.0;
   String _localeCode = 'system'; // 'system', 'tr', 'en'
 
   int _autoLockMinutes = 5; // 0 = off, 1, 5, 15
-  bool _lockOnBackground = true;
+  bool _lockOnBackground = defaultLockOnBackground;
   bool _flagSecureEnabled = true;
   int _clipboardTimeoutSeconds = 30; // 0 = off, 10, 30, 60
+  int _twoFactorRepromptDays = 30; // 30, 60, 90 (default: 30)
 
   bool _trayEnabled = true;
   bool _globalHotkeyEnabled = true;
@@ -35,6 +43,7 @@ class SettingsProvider extends ChangeNotifier {
   bool get lockOnBackground => _lockOnBackground;
   bool get flagSecureEnabled => _flagSecureEnabled;
   int get clipboardTimeoutSeconds => _clipboardTimeoutSeconds;
+  int get twoFactorRepromptDays => _twoFactorRepromptDays;
   bool get trayEnabled => _trayEnabled;
   bool get globalHotkeyEnabled => _globalHotkeyEnabled;
   bool get autofillEnabled => _autofillEnabled;
@@ -74,11 +83,14 @@ class SettingsProvider extends ChangeNotifier {
     _localeCode = prefs.getString(AppConstants.keyLocaleCode) ?? 'system';
 
     _autoLockMinutes = prefs.getInt(AppConstants.keyAutoLockMinutes) ?? 5;
-    _lockOnBackground = prefs.getBool(AppConstants.keyLockOnBackground) ?? true;
+    _lockOnBackground =
+        prefs.getBool(AppConstants.keyLockOnBackground) ?? defaultLockOnBackground;
     _flagSecureEnabled =
         prefs.getBool(AppConstants.keyFlagSecureEnabled) ?? true;
     _clipboardTimeoutSeconds =
         prefs.getInt(AppConstants.keyClipboardTimeoutSeconds) ?? 30;
+    _twoFactorRepromptDays =
+        prefs.getInt(AppConstants.keyTwoFactorRepromptDays) ?? 30;
 
     _trayEnabled = prefs.getBool(AppConstants.keyTrayEnabled) ?? true;
     _globalHotkeyEnabled =
@@ -146,6 +158,13 @@ class SettingsProvider extends ChangeNotifier {
     ClipboardService.setDefaultTimeoutSeconds(seconds);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(AppConstants.keyClipboardTimeoutSeconds, seconds);
+    notifyListeners();
+  }
+
+  Future<void> setTwoFactorRepromptDays(int days) async {
+    _twoFactorRepromptDays = days;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(AppConstants.keyTwoFactorRepromptDays, days);
     notifyListeners();
   }
 

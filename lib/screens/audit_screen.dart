@@ -20,7 +20,7 @@ import 'note_editor_screen.dart';
 import 'secret_editor_screen.dart';
 import 'wifi_editor_screen.dart';
 
-enum _AuditFilter { all, passwords, twofa, cardsAndDocs, phishing }
+enum _AuditFilter { all, passwords, cardsAndDocs, phishing }
 
 class AuditScreen extends StatefulWidget {
   const AuditScreen({super.key});
@@ -91,6 +91,10 @@ class _AuditScreenState extends State<AuditScreen> {
         screen = NoteEditorScreen(initialItem: item);
         break;
       case VaultItemType.credential:
+      case VaultItemType.bankAccount:
+      case VaultItemType.server:
+      case VaultItemType.database:
+      case VaultItemType.cryptoWallet:
         screen = CredentialEditorScreen(initialItem: item);
         break;
       case VaultItemType.card:
@@ -481,8 +485,6 @@ class _AuditScreenState extends State<AuditScreen> {
         return issue.issueType == 'weak' ||
             issue.issueType == 'reused' ||
             issue.issueType == 'expired';
-      case _AuditFilter.twofa:
-        return issue.issueType == 'missing_2fa';
       case _AuditFilter.cardsAndDocs:
         return issue.issueType == 'card_invalid' ||
             issue.issueType == 'card_expired' ||
@@ -611,9 +613,9 @@ class _AuditScreenState extends State<AuditScreen> {
                         color: Colors.orangeAccent,
                       ),
                       _MetricPill(
-                        label: l10n.tr('2FA Eksik', 'No 2FA'),
+                        label: l10n.tr('2FA Eklenmemiş', 'No 2FA'),
                         count: report.missing2faCount,
-                        color: Colors.amber,
+                        color: Colors.blueGrey,
                       ),
                       _MetricPill(
                         label: l10n.tr('Süresi Dolan', 'Expired'),
@@ -800,11 +802,6 @@ class _AuditScreenState extends State<AuditScreen> {
                   label: l10n.tr('Parola Sorunları', 'Passwords'),
                   selected: _filter == _AuditFilter.passwords,
                   onTap: () => setState(() => _filter = _AuditFilter.passwords),
-                ),
-                _FilterChipBtn(
-                  label: l10n.tr('2FA Eksik', 'Missing 2FA'),
-                  selected: _filter == _AuditFilter.twofa,
-                  onTap: () => setState(() => _filter = _AuditFilter.twofa),
                 ),
                 _FilterChipBtn(
                   label: l10n.tr('Kart & Kimlik', 'Cards & IDs'),

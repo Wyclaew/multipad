@@ -61,6 +61,14 @@ class _QuickSearchDialogState extends State<QuickSearchDialog> {
         return Icons.badge;
       case VaultItemType.license:
         return Icons.verified_user;
+      case VaultItemType.bankAccount:
+        return Icons.account_balance;
+      case VaultItemType.server:
+        return Icons.dns;
+      case VaultItemType.database:
+        return Icons.storage;
+      case VaultItemType.cryptoWallet:
+        return Icons.account_balance_wallet;
       case VaultItemType.note:
       case VaultItemType.folder:
         return Icons.description;

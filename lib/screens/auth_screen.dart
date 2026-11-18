@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../l10n/app_localizations.dart';
@@ -27,6 +29,7 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _isLoading = false;
   bool _isConfiguringSupabase = false;
   bool _preferArgon2idOnRegister = true;
+  bool _hasAutoTriggeredBiometrics = false;
   Timer? _lockoutTicker;
 
   @override
@@ -41,6 +44,24 @@ class _AuthScreenState extends State<AuthScreen> {
       _preferArgon2idOnRegister = auth.preferArgon2id;
       _usePinMode = auth.isQuickPinEnabled;
       _syncLockoutTicker(auth);
+      _maybeAutoTriggerBiometrics(auth);
+    });
+  }
+
+  void _maybeAutoTriggerBiometrics(AuthProvider auth) {
+    if (_hasAutoTriggeredBiometrics) return;
+    final isMobileOrMac = !kIsWeb &&
+        (Platform.isAndroid || Platform.isIOS || Platform.isMacOS);
+    if (!isMobileOrMac) return;
+    if (_isRegistering || _isConfiguringSupabase || _isLoading) return;
+    if (auth.status == VaultLockStatus.mfaRequired || auth.isUnlocked) return;
+    if (!auth.canUseBiometricsNow) return;
+
+    _hasAutoTriggeredBiometrics = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      await auth.unlockWithBiometrics(isSilentAutoTrigger: true);
+      if (mounted) _syncLockoutTicker(auth);
     });
   }
 
@@ -186,6 +207,8 @@ class _AuthScreenState extends State<AuthScreen> {
     final auth = context.watch<AuthProvider>();
     final theme = Theme.of(context);
 
+    _maybeAutoTriggerBiometrics(auth);
+
     Widget content;
     if (_isConfiguringSupabase) {
       content = _buildSupabaseConfigView(auth, theme, l10n);
@@ -194,6 +217,12 @@ class _AuthScreenState extends State<AuthScreen> {
     } else {
       content = _buildAuthView(auth, theme, l10n);
     }
+
+    final showBiometricFab = !_isRegistering &&
+        !_isConfiguringSupabase &&
+        auth.status != VaultLockStatus.mfaRequired &&
+        !auth.isUnlocked &&
+        auth.canUseBiometricsNow;
 
     return Scaffold(
       body: Center(
@@ -210,6 +239,20 @@ class _AuthScreenState extends State<AuthScreen> {
           ),
         ),
       ),
+      floatingActionButton: showBiometricFab
+          ? FloatingActionButton.small(
+              heroTag: 'biometric_quick_fab',
+              tooltip: l10n.tr('Biyometrik Giriş', 'Biometric Login'),
+              onPressed: _isLoading
+                  ? null
+                  : () async {
+                      await auth.unlockWithBiometrics();
+                      if (mounted) _syncLockoutTicker(auth);
+                    },
+              child: const Icon(Icons.fingerprint, size: 22),
+            )
+          : null,
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
 

@@ -10,6 +10,7 @@ import android.service.autofill.FillCallback
 import android.service.autofill.FillRequest
 import android.service.autofill.FillResponse
 import android.service.autofill.SaveCallback
+import android.service.autofill.SaveInfo
 import android.service.autofill.SaveRequest
 import android.text.InputType
 import android.view.View
@@ -118,13 +119,100 @@ class MultiPadAutofillService : AutofillService() {
         if (addedDatasets == 0) {
             callback.onSuccess(null)
         } else {
+            val allSaveIds = ArrayList<AutofillId>()
+            allSaveIds.addAll(parsed.passwordIds)
+            allSaveIds.addAll(parsed.usernameIds)
+            if (allSaveIds.isNotEmpty()) {
+                val requiredIds = if (parsed.passwordIds.isNotEmpty()) {
+                    parsed.passwordIds.toTypedArray()
+                } else {
+                    parsed.usernameIds.toTypedArray()
+                }
+                val saveInfoBuilder = SaveInfo.Builder(
+                    SaveInfo.SAVE_DATA_TYPE_PASSWORD or SaveInfo.SAVE_DATA_TYPE_USERNAME,
+                    requiredIds,
+                )
+                if (parsed.passwordIds.isNotEmpty() && parsed.usernameIds.isNotEmpty()) {
+                    saveInfoBuilder.setOptionalIds(parsed.usernameIds.toTypedArray())
+                }
+                responseBuilder.setSaveInfo(saveInfoBuilder.build())
+            }
             callback.onSuccess(responseBuilder.build())
         }
     }
 
+    private data class ExtractedSaveData(
+        var username: String = "",
+        var password: String = "",
+        val webDomains: MutableSet<String> = mutableSetOf(),
+    )
+
     override fun onSaveRequest(request: SaveRequest, callback: SaveCallback) {
-        // MultiPad encrypts entries only inside the unlocked master-key vault.
+        val contexts = request.fillContexts
+        if (contexts.isEmpty()) {
+            callback.onSuccess()
+            return
+        }
+
+        val structure = contexts.last().structure
+        val pkgName = structure.activityComponent?.packageName?.lowercase(Locale.US) ?: ""
+        val extracted = ExtractedSaveData()
+        traverseStructureForSave(structure, extracted)
+
+        if (extracted.password.isNotBlank() || extracted.username.isNotBlank()) {
+            val domain = extracted.webDomains.firstOrNull() ?: pkgName
+            val title = if (extracted.webDomains.isNotEmpty()) {
+                domain.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
+            } else {
+                pkgName
+            }
+            val pending = PendingCredentialEntry(
+                id = java.util.UUID.randomUUID().toString(),
+                title = title,
+                website = domain,
+                username = extracted.username,
+                password = extracted.password,
+                packageName = pkgName,
+                timestamp = System.currentTimeMillis(),
+            )
+            AutofillCryptoStore.savePendingCredential(applicationContext, pending)
+        }
         callback.onSuccess()
+    }
+
+    private fun traverseStructureForSave(structure: AssistStructure, out: ExtractedSaveData) {
+        for (i in 0 until structure.windowNodeCount) {
+            val root = structure.getWindowNodeAt(i).rootViewNode ?: continue
+            traverseNodeForSave(root, out)
+        }
+    }
+
+    private fun traverseNodeForSave(node: AssistStructure.ViewNode, out: ExtractedSaveData) {
+        val domain = node.webDomain
+        if (!domain.isNullOrBlank()) {
+            out.webDomains.add(domain.lowercase(Locale.US).removePrefix("www."))
+        }
+
+        val autofillId = node.autofillId
+        if (autofillId != null && node.autofillType != View.AUTOFILL_TYPE_NONE) {
+            val parsed = ParsedFields()
+            classifyNode(node, autofillId, parsed)
+            val textVal = node.autofillValue?.textValue?.toString()
+                ?: node.text?.toString()
+                ?: ""
+
+            if (textVal.isNotBlank()) {
+                if (parsed.passwordIds.contains(autofillId) && out.password.isBlank()) {
+                    out.password = textVal
+                } else if (parsed.usernameIds.contains(autofillId) && out.username.isBlank()) {
+                    out.username = textVal
+                }
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            traverseNodeForSave(node.getChildAt(i), out)
+        }
     }
 
     private fun traverseStructure(structure: AssistStructure, out: ParsedFields) {
