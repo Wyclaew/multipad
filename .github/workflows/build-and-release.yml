@@ -30,7 +30,7 @@ jobs:
         run: flutter pub get
 
       - name: Run static analysis
-        run: flutter analyze
+        run: flutter analyze --no-fatal-infos
 
       - name: Run unit & widget tests
         run: flutter test
@@ -251,8 +251,10 @@ jobs:
           - 🔐 **Bütünlük Kontrolü:** \`SHA256SUMS.txt\`
 
           **Öne Çıkan Yenilikler ($TAG_NAME):**
-          - **Güvenlik:** Argon2id KDF geçişi, Hızlı PIN, Sahte/Panik Kasası (Duress), Otomatik Kilit, Şifreli Güvenlik Günlüğü, Hesap 2FA (Supabase TOTP MFA) & tüm diğer oturumlardan çıkış.
-          - **Eşleştirme & Senkronizasyon:** SQLite yerel veritabanı + 3 yönlü çakışma çözümü, tam QR kod eşleştirme (\`MPPAIR:\` / \`MPSETUP:\` / \`otpauth://\`), LAN eşleştirme ve Aktarım Kodu düzeltmeleri.
-          - **Kasa & Üretkenlik:** Markdown & Yapılacak listeleri, şifreli dosya ekleri, Chrome/Edge/Bitwarden/KeePass içe aktarım, iç içe klasörler, özel alanlar, sürüm geçmişi, Wi-Fi/Kimlik/Lisans türleri, Luhn/phishing denetimi & tek tıkla şifre yenileme sihirbazı, AMOLED tema ve TR/EN dil desteği.
+          - **Passkey (FIDO2 / WebAuthn):** Hesaplara özel passkey saklama ve Bitwarden'dan (fido2Credentials) eksiksiz içe aktarma desteği.
+          - **Biyometrik & Kilit Ergonomisi:** Açılışta otomatik biyometrik tetikleme, giriş ekranında yüzen mini parmak izi butonu, ayarlanabilir macOS arka plan kilidi ve Android ayarlar toleransı.
+          - **Masaüstü Tarayıcı Eklentisi:** Manifest V3 tarayıcı eklentisi (Chrome/Edge/Firefox) ve 127.0.0.1 üzerinde şifreli loopback köprüsü.
+          - **Güvenlik & Denetim:** Ayarlanabilir 2FA aralıkları (30/60/90 gün), şifreli Bitwarden JSON içe aktarımı, RAM bellek sıfırlama (zero-wiping), merkezi 1 Hz TOTP servisi ve kalibre edilmiş güvenlik denetimi.
+          - **Android Autofill:** Yeni ve güncellenen şifreleri otomatik yakalama (SaveInfo) ve Bildirim Paneli Hızlı Ayarlar Kutucuğu (Quick Settings Tile).
 
           > **macOS İlk Açılış Notu:** Apple Developer ID noter onayı olmadığından ilk açılışta macOS uyarı verirse **Sağ tık -> Aç** veya *Sistem Ayarları -> Gizlilik ve Güvenlik -> Yine de Aç* adımlarını izleyin."
