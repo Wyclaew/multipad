@@ -211,9 +211,11 @@ void main() {
         macKey: subkeys.macKey,
       );
 
-      // Tamper MAC
-      final lastChar = cipherString.endsWith('A') ? 'B' : 'A';
-      final tampered = '${cipherString.substring(0, cipherString.length - 2)}$lastChar=';
+      // Tamper MAC by modifying first character of MAC base64 string
+      final parts = cipherString.split('|');
+      final mac = parts[2];
+      final tamperedMac = '${mac[0] == 'A' ? 'B' : 'A'}${mac.substring(1)}';
+      final tampered = '${parts[0]}|${parts[1]}|$tamperedMac';
 
       await expectLater(
         () => crypto.decryptBitwardenCipherString(
