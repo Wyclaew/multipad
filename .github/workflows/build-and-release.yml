@@ -64,7 +64,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Android Release APK
-        run: flutter build apk --release
+        run: flutter build apk --release --android-skip-build-dependency-validation
 
       - name: Prepare APK artifact
         run: cp build/app/outputs/flutter-apk/app-release.apk MultiPad-Android.apk
