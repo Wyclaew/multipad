@@ -1,23 +1,17 @@
-import 'dart:async';
+// ignore_for_file: invalid_use_of_visible_for_testing_member
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:multipad/constants.dart';
 import 'package:multipad/models/vault_item.dart';
 import 'package:multipad/providers/auth_provider.dart';
 import 'package:multipad/providers/settings_provider.dart';
-import 'package:multipad/providers/vault_provider.dart';
 import 'package:multipad/services/audit_service.dart';
 import 'package:multipad/services/biometric_service.dart';
 import 'package:multipad/services/clipboard_service.dart';
-import 'package:multipad/services/crypto_service.dart';
-import 'package:multipad/services/import_service.dart';
 import 'package:multipad/services/native_bridge_service.dart';
-import 'package:multipad/services/totp_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'test_helpers.dart';
@@ -465,7 +459,7 @@ void main() {
       );
 
       // Verify channel callback registration
-      expect(true, isTrue);
+      expect(lockInvoked, isFalse);
     });
 
     // -------------------------------------------------------------------------

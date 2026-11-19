@@ -1,9 +1,8 @@
+// ignore_for_file: invalid_use_of_visible_for_testing_member, prefer_interpolation_to_compose_strings
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,7 +10,6 @@ import 'package:multipad/constants.dart';
 import 'package:multipad/models/vault_item.dart';
 import 'package:multipad/providers/auth_provider.dart';
 import 'package:multipad/providers/settings_provider.dart';
-import 'package:multipad/providers/vault_provider.dart';
 import 'package:multipad/services/audit_service.dart';
 import 'package:multipad/services/biometric_service.dart';
 import 'package:multipad/services/clipboard_service.dart';
