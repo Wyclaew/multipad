@@ -12,7 +12,7 @@ import 'package:multipad/services/totp_service.dart';
 /// Binds strictly to 127.0.0.1 (default port: 48292).
 class BrowserBridgeService {
   static const int defaultPort = 48292;
-  static const String currentVersion = '1.2.0';
+  static const String currentVersion = '1.3.0';
 
   final bool Function() isUnlocked;
   final List<VaultItem> Function() getItems;

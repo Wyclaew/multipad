@@ -1,8 +1,8 @@
 // MultiPad Global Configuration Constants
 
 class AppConstants {
-  static const String appVersion = '1.2.0';
-  static const int buildNumber = 1;
+  static const String appVersion = '1.3.0';
+  static const int buildNumber = 4;
 
   // Can be configured here or entered directly in the app's Setup / Settings screen.
   static const String defaultSupabaseUrl = '';

@@ -893,14 +893,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _checkingUpdate = false);
 
     if (info == null) {
+      final errorMsg = UpdateService.lastErrorMessage ??
+          l10n.tr(
+            'Güncelleme sunucusuna ulaşılamadı.',
+            'Could not reach update server.',
+          );
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            l10n.tr(
-              'Güncelleme sunucusuna ulaşılamadı.',
-              'Could not reach update server.',
-            ),
-          ),
+          content: Text(errorMsg),
+          duration: const Duration(seconds: 4),
         ),
       );
       return;

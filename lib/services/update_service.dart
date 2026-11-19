@@ -71,19 +71,38 @@ class UpdateService {
   static const String repoOwner = 'Wyclaew';
   static const String repoName = 'multipad';
   static const String currentAppVersion = AppConstants.appVersion;
+  static String? lastErrorMessage;
 
   /// Queries GitHub Releases API to check if a newer release exists and resolves SHA-256 digests.
-  static Future<UpdateInfo?> checkForUpdate() async {
+  static Future<UpdateInfo?> checkForUpdate({String? customToken}) async {
+    lastErrorMessage = null;
     try {
       final url = Uri.parse(
         'https://api.github.com/repos/$repoOwner/$repoName/releases/latest',
       );
-      final response = await http.get(url, headers: {
+      final headers = <String, String>{
         'Accept': 'application/vnd.github.v3+json',
         'User-Agent': 'MultiPad-App',
-      }).timeout(const Duration(seconds: 8));
+      };
+      if (customToken != null && customToken.trim().isNotEmpty) {
+        headers['Authorization'] = 'Bearer ${customToken.trim()}';
+      }
 
-      if (response.statusCode != 200) return null;
+      final response = await http.get(url, headers: headers).timeout(const Duration(seconds: 8));
+
+      if (response.statusCode != 200) {
+        if (response.statusCode == 404) {
+          lastErrorMessage =
+              'Sunucuda sürüm bulunamadı (404 Not Found). GitHub deposu gizli (Private) moddaysa genel güncelleme denetimi yapılamaz.';
+        } else if (response.statusCode == 403) {
+          lastErrorMessage =
+              'GitHub API istek sınırı aşıldı (403 Forbidden). Lütfen birkaç dakika sonra tekrar deneyin.';
+        } else {
+          lastErrorMessage =
+              'Güncelleme sunucusu hata verdi (HTTP ${response.statusCode}).';
+        }
+        return null;
+      }
 
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       final rawTag = data['tag_name'] as String? ?? '';
@@ -145,8 +164,17 @@ class UpdateService {
         htmlUrl: htmlUrl,
         assets: assets,
       );
+    } on TimeoutException {
+      lastErrorMessage =
+          'Güncelleme sunucusuna bağlanırken zaman aşımı oluştu. Lütfen internet bağlantınızı kontrol edin.';
+      return null;
+    } on SocketException {
+      lastErrorMessage =
+          'İnternet bağlantısı kurulamadı. Lütfen ağ bağlantınızı kontrol edin.';
+      return null;
     } catch (e) {
       debugPrint('Update check error: $e');
+      lastErrorMessage = 'Güncelleme denetlenirken hata oluştu: $e';
       return null;
     }
   }

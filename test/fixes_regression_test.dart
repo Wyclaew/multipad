@@ -90,6 +90,8 @@ invalid line ignored
     });
 
     test('isVersionNewer compares semantic major.minor.patch versions accurately', () {
+      expect(UpdateService.isVersionNewer('1.3.0', '1.2.0'), isTrue);
+      expect(UpdateService.isVersionNewer('1.3.0', '1.3.0'), isFalse);
       expect(UpdateService.isVersionNewer('1.2.0', '1.1.9'), isTrue);
       expect(UpdateService.isVersionNewer('1.1.10', '1.1.2'), isTrue);
       expect(UpdateService.isVersionNewer('1.1.0', '1.1.0'), isFalse);

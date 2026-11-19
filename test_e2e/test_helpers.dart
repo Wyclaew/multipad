@@ -471,7 +471,7 @@ class TestBrowserBridgeHarness {
       return http.Response(
         jsonEncode({
           'status': isUnlocked() ? 'unlocked' : 'locked',
-          'version': '1.2.0',
+          'version': '1.3.0',
         }),
         HttpStatus.ok,
         headers: {'content-type': 'application/json'},

@@ -52,7 +52,7 @@ void main() {
       expect(res1.statusCode, 200);
       final json1 = jsonDecode(res1.body) as Map<String, dynamic>;
       expect(json1['status'], 'unlocked');
-      expect(json1['version'], '1.2.0');
+      expect(json1['version'], '1.3.0');
 
       // Locked
       unlocked = false;
