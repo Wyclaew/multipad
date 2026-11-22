@@ -65,6 +65,10 @@ class MultiPadAutofillService : AutofillService() {
 
         val pkgName = structure.activityComponent?.packageName?.lowercase(Locale.US) ?: ""
         val ranked = rankEntries(allEntries, parsed.webDomains, pkgName)
+        if (ranked.isEmpty()) {
+            callback.onSuccess(null)
+            return
+        }
 
         val responseBuilder = FillResponse.Builder()
         var addedDatasets = 0
@@ -159,7 +163,7 @@ class MultiPadAutofillService : AutofillService() {
         val extracted = ExtractedSaveData()
         traverseStructureForSave(structure, extracted)
 
-        if (extracted.password.isNotBlank() || extracted.username.isNotBlank()) {
+        if (extracted.password.isNotBlank() && (extracted.username.isNotBlank() || extracted.webDomains.isNotEmpty())) {
             val domain = extracted.webDomains.firstOrNull() ?: pkgName
             val title = if (extracted.webDomains.isNotEmpty()) {
                 domain.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
@@ -371,6 +375,7 @@ class MultiPadAutofillService : AutofillService() {
 
         return entries
             .map { it to score(it) }
+            .filter { it.second > 0 }
             .sortedByDescending { it.second }
             .map { it.first }
     }

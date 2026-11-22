@@ -121,7 +121,8 @@ object AutofillCryptoStore {
                 .putString(PREF_CIPHERTEXT, Base64.encodeToString(encryptedBytes, Base64.NO_WRAP))
                 .putString(PREF_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
                 .apply()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.e("AutofillCryptoStore", "Error in keystore/storage operation", e)
         }
     }
 
@@ -185,7 +186,8 @@ object AutofillCryptoStore {
             inMemoryEntries.clear()
             inMemoryEntries.addAll(result)
             ArrayList(result)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.e("AutofillCryptoStore", "Error loading entries from keystore/storage", e)
             emptyList()
         }
     }
@@ -227,7 +229,8 @@ object AutofillCryptoStore {
                 .putString(PREF_PENDING_CIPHERTEXT, Base64.encodeToString(encryptedBytes, Base64.NO_WRAP))
                 .putString(PREF_PENDING_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
                 .apply()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.e("AutofillCryptoStore", "Error in keystore/storage operation", e)
         }
     }
 
@@ -266,7 +269,8 @@ object AutofillCryptoStore {
             inMemoryPending.clear()
             inMemoryPending.addAll(result)
             ArrayList(result)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.e("AutofillCryptoStore", "Error loading pending credentials from keystore/storage", e)
             emptyList()
         }
     }

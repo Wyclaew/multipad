@@ -6,6 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../constants.dart';
+import '../main.dart' show rootNavigatorKey;
 import '../services/biometric_service.dart';
 import '../services/crypto_service.dart';
 import '../services/native_bridge_service.dart';
@@ -28,6 +29,7 @@ class AuthProvider with ChangeNotifier {
   final BiometricService _biometricService;
   final SecurityLogService _securityLogService;
   final FlutterSecureStorage _secureStorage;
+  final GlobalKey<NavigatorState>? _navigatorKey;
 
   AuthProvider({
     CryptoService? cryptoService,
@@ -35,6 +37,7 @@ class AuthProvider with ChangeNotifier {
     BiometricService? biometricService,
     SecurityLogService? securityLogService,
     FlutterSecureStorage? secureStorage,
+    GlobalKey<NavigatorState>? navigatorKey,
   })  : _cryptoService = cryptoService ?? CryptoService(),
         _supabaseService = supabaseService ?? SupabaseService(),
         _biometricService = biometricService ?? BiometricService(),
@@ -43,7 +46,8 @@ class AuthProvider with ChangeNotifier {
             const FlutterSecureStorage(
               aOptions: AndroidOptions(encryptedSharedPreferences: true),
               mOptions: MacOsOptions(useDataProtectionKeyChain: false),
-            );
+            ),
+        _navigatorKey = navigatorKey;
 
   VaultLockStatus _status = VaultLockStatus.needsSetup;
   List<int>? _masterKey;
@@ -114,12 +118,35 @@ class AuthProvider with ChangeNotifier {
     return difference >= Duration(days: days);
   }
 
+  static const String _keyMfaIntegrityDeviceKey = 'multipad_mfa_integrity_device_key_v1';
+
+  /// Retrieves or generates a 256-bit persistent cryptographically random device key
+  /// in FlutterSecureStorage used for signing and verifying 2FA integrity timestamps.
+  Future<List<int>> _getOrCreateMfaIntegrityKey() async {
+    try {
+      final storedB64 = await _secureStorage.read(key: _keyMfaIntegrityDeviceKey);
+      if (storedB64 != null && storedB64.isNotEmpty) {
+        final decoded = base64Decode(storedB64);
+        if (decoded.length >= 32) return decoded;
+      }
+    } catch (_) {}
+
+    final newKey = _cryptoService.generateRandomBytes(32);
+    try {
+      await _secureStorage.write(
+        key: _keyMfaIntegrityDeviceKey,
+        value: base64Encode(newKey),
+      );
+    } catch (_) {}
+    return newKey;
+  }
+
   /// Saves 2FA verification timestamp into FlutterSecureStorage protected by an HMAC-SHA256 signature.
   Future<void> saveTwoFactorVerification(DateTime timestamp) async {
     _twoFactorLastVerified = timestamp.toUtc();
     final iso = _twoFactorLastVerified!.toIso8601String();
 
-    final hmacKey = _masterKey ?? utf8.encode('multipad_mfa_integrity_root_key');
+    final hmacKey = await _getOrCreateMfaIntegrityKey();
     final hmac = crypto_pkg.Hmac(crypto_pkg.sha256, hmacKey);
     final signature = base64Encode(
       hmac.convert(utf8.encode('$iso:${_currentUserEmail ?? ""}')).bytes,
@@ -148,6 +175,7 @@ class AuthProvider with ChangeNotifier {
     if (secureIso == null || storedSignature == null) {
       if (_twoFactorLastVerified != null) {
         _isTwoFactorSignatureValid = false;
+        _twoFactorLastVerified = null;
         return false;
       }
       _isTwoFactorSignatureValid = true;
@@ -157,10 +185,11 @@ class AuthProvider with ChangeNotifier {
     if (_twoFactorLastVerified != null &&
         secureIso != _twoFactorLastVerified!.toIso8601String()) {
       _isTwoFactorSignatureValid = false;
+      _twoFactorLastVerified = null;
       return false;
     }
 
-    final hmacKey = _masterKey ?? utf8.encode('multipad_mfa_integrity_root_key');
+    final hmacKey = await _getOrCreateMfaIntegrityKey();
     final hmac = crypto_pkg.Hmac(crypto_pkg.sha256, hmacKey);
     final expectedSignature = base64Encode(
       hmac.convert(utf8.encode('$secureIso:${_currentUserEmail ?? ""}')).bytes,
@@ -170,6 +199,9 @@ class AuthProvider with ChangeNotifier {
       storedSignature,
       expectedSignature,
     );
+    if (!_isTwoFactorSignatureValid) {
+      _twoFactorLastVerified = null;
+    }
     return _isTwoFactorSignatureValid;
   }
 
@@ -299,6 +331,12 @@ class AuthProvider with ChangeNotifier {
     final lastVerifiedIso = prefs.getString(AppConstants.keyTwoFactorLastVerifiedIso);
     _twoFactorLastVerified = lastVerifiedIso != null ? DateTime.tryParse(lastVerifiedIso) : null;
     _twoFactorRepromptDays = prefs.getInt(AppConstants.keyTwoFactorRepromptDays) ?? 30;
+
+    // Enforce 2FA timestamp integrity verification
+    final isSignatureValid = await verifyTwoFactorTimestampIntegrity();
+    if (!isSignatureValid) {
+      _twoFactorLastVerified = null;
+    }
   }
 
   Future<void> refreshSecurityState() async {
@@ -754,13 +792,7 @@ class AuthProvider with ChangeNotifier {
         code: cleanCode,
       );
       await _securityLogService.resetFailedAttempts();
-      _twoFactorLastVerified = DateTime.now().toUtc();
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(
-        AppConstants.keyTwoFactorLastVerifiedIso,
-        _twoFactorLastVerified!.toIso8601String(),
-      );
-      await _loadSecurityPreferences(prefs);
+      await saveTwoFactorVerification(DateTime.now().toUtc());
 
       _hasVerifiedMfa = true;
       _status = VaultLockStatus.unlocked;
@@ -781,6 +813,9 @@ class AuthProvider with ChangeNotifier {
   }
 
   void cancelMfaAndLock() {
+    final nav = _navigatorKey ?? rootNavigatorKey;
+    nav.currentState?.popUntil((route) => route.isFirst);
+
     CryptoService.wipe(_masterKey);
     _masterKey = null;
     _isDuressMode = false;
@@ -1400,6 +1435,10 @@ class AuthProvider with ChangeNotifier {
     if (_status != VaultLockStatus.unlocked && _status != VaultLockStatus.mfaRequired) {
       return;
     }
+    // Dismiss all active sub-routes, credential/card editors, dialogs back to root AuthScreen
+    final nav = _navigatorKey ?? rootNavigatorKey;
+    nav.currentState?.popUntil((route) => route.isFirst);
+
     CryptoService.wipe(_masterKey);
     _masterKey = null;
     _isDuressMode = false;
@@ -1427,6 +1466,9 @@ class AuthProvider with ChangeNotifier {
   }
 
   Future<void> logout() async {
+    final nav = _navigatorKey ?? rootNavigatorKey;
+    nav.currentState?.popUntil((route) => route.isFirst);
+
     CryptoService.wipe(_masterKey);
     _masterKey = null;
     _isDuressMode = false;

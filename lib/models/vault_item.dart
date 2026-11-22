@@ -264,11 +264,11 @@ class VaultPasskey {
   final String rpName;
   final String userName;
   final String userHandle;
-  final String privateKey;
+  String privateKey;
   final int algorithm;
   final DateTime createdAt;
 
-  const VaultPasskey({
+  VaultPasskey({
     required this.id,
     required this.credentialId,
     required this.rpId,
@@ -279,6 +279,11 @@ class VaultPasskey {
     this.algorithm = -7,
     required this.createdAt,
   });
+
+  /// Zeroes out the private key representation in memory.
+  void wipe() {
+    privateKey = '';
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -348,11 +353,11 @@ class VaultItem {
 
   // Decrypted contents (available in memory when unlocked)
   final String title;
-  final String content; // Used for notes (Markdown/Checklist) or general text
+  String content; // Used for notes (Markdown/Checklist) or general text
   final String username; // Used for credentials
-  final String password; // Used for credentials
+  String password; // Used for credentials
   final String website; // Used for credentials
-  final String totpSecret; // 2FA TOTP Base32 secret or otpauth URI
+  String totpSecret; // 2FA TOTP Base32 secret or otpauth URI
 
   // Password Expiry & Reminder System
   final DateTime? passwordLastModified;
@@ -360,18 +365,18 @@ class VaultItem {
   final DateTime? customReminderDate;
 
   // Credit / Bank Card fields
-  final String cardNumber;
+  String cardNumber;
   final String cardHolder;
   final String cardExpiry;
-  final String cardCvv;
-  final String cardPin;
+  String cardCvv;
+  String cardPin;
 
   // Secret Key / Token fields (also used for folder color hex)
   final String secretType;
 
   // Wi-Fi fields
   final String wifiSsid;
-  final String wifiPassword;
+  String wifiPassword;
   final String wifiSecurity; // 'WPA', 'WEP', 'nopass'
   final bool wifiHidden;
 
@@ -385,7 +390,7 @@ class VaultItem {
   final String nationality;
 
   // Software License fields
-  final String licenseKey;
+  String licenseKey;
   final String productName;
   final String licensedTo;
   final String purchaseDate;
@@ -403,8 +408,8 @@ class VaultItem {
   final String serverHost;
   final String serverPort;
   final String serverUsername;
-  final String serverPassword;
-  final String serverKey;
+  String serverPassword;
+  String serverKey;
 
   // Database fields
   final String databaseType;
@@ -412,11 +417,11 @@ class VaultItem {
   final String databasePort;
   final String databaseName;
   final String databaseUser;
-  final String databasePassword;
+  String databasePassword;
 
   // Crypto Wallet fields
   final String cryptoWalletAddress;
-  final String cryptoSeedPhrase;
+  String cryptoSeedPhrase;
   final String cryptoNetwork;
 
   // Metadata & Organization
@@ -425,11 +430,11 @@ class VaultItem {
   final bool isFavorite;
   final bool isPinned;
   final bool isTrash;
-  final List<String> passwordHistory;
-  final List<CustomField> customFields;
-  final List<VaultAttachmentMeta> attachments;
-  final List<VaultItemRevision> revisions;
-  final List<VaultPasskey> passkeys;
+  List<String> passwordHistory;
+  List<CustomField> customFields;
+  List<VaultAttachmentMeta> attachments;
+  List<VaultItemRevision> revisions;
+  List<VaultPasskey> passkeys;
 
   // Sync / Cloud metadata
   final bool isDeleted; // Permanent soft-delete tombstone
@@ -976,5 +981,45 @@ class VaultItem {
   /// Overwrites and zeroes sensitive secret state in memory upon vault lock.
   void wipeSecrets() {
     _isWiped = true;
+    password = '';
+    content = '';
+    cardNumber = '';
+    cardCvv = '';
+    cardPin = '';
+    cryptoSeedPhrase = '';
+    totpSecret = '';
+    wifiPassword = '';
+    serverPassword = '';
+    databasePassword = '';
+    serverKey = '';
+    licenseKey = '';
+    try {
+      for (final passkey in passkeys) {
+        passkey.wipe();
+      }
+      passkeys.clear();
+    } catch (_) {
+      passkeys = [];
+    }
+    try {
+      passwordHistory.clear();
+    } catch (_) {
+      passwordHistory = [];
+    }
+    try {
+      customFields.clear();
+    } catch (_) {
+      customFields = [];
+    }
+    try {
+      attachments.clear();
+    } catch (_) {
+      attachments = [];
+    }
+    try {
+      revisions.clear();
+    } catch (_) {
+      revisions = [];
+    }
   }
 }

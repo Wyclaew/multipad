@@ -9,6 +9,7 @@ import 'providers/settings_provider.dart';
 import 'providers/vault_provider.dart';
 import 'screens/auth_screen.dart';
 import 'screens/home_screen.dart';
+import 'services/browser_bridge_service.dart';
 import 'services/native_bridge_service.dart';
 import 'services/totp_ticker_service.dart';
 import 'widgets/quick_search_dialog.dart';
@@ -188,6 +189,30 @@ class VaultLifecycleShellState extends State<VaultLifecycleShell>
   int _lastTimeoutMinutes = -1;
   bool _wasUnlocked = false;
   bool _quickSearchDialogOpen = false;
+  BrowserBridgeService? _browserBridge;
+
+  BrowserBridgeService? get browserBridge => _browserBridge;
+
+  void _initBrowserBridge() {
+    if (_browserBridge != null) return;
+    _browserBridge = BrowserBridgeService(
+      isUnlocked: () {
+        if (!mounted) return false;
+        return context.read<AuthProvider>().isUnlocked;
+      },
+      getItems: () {
+        if (!mounted) return [];
+        return context.read<VaultProvider>().items;
+      },
+      onSaveItem: (item) async {
+        if (!mounted) return;
+        await context.read<VaultProvider>().saveItem(item);
+      },
+    );
+    _browserBridge!.start().catchError((e) {
+      debugPrint('BrowserBridgeService startup notice: $e');
+    });
+  }
 
   @override
   void initState() {
@@ -197,6 +222,10 @@ class VaultLifecycleShellState extends State<VaultLifecycleShell>
       onQuickSearchRequested: () => _handleQuickSearchRequested(),
       onLockVaultRequested: _handleNativeLockRequested,
     );
+    if ((Platform.isMacOS || Platform.isWindows) &&
+        !Platform.environment.containsKey('FLUTTER_TEST')) {
+      _initBrowserBridge();
+    }
   }
 
   @override
@@ -206,6 +235,9 @@ class VaultLifecycleShellState extends State<VaultLifecycleShell>
     final settings = context.watch<SettingsProvider>();
     if (_lastTimeoutMinutes != settings.autoLockMinutes ||
         _wasUnlocked != auth.isUnlocked) {
+      if (_wasUnlocked && !auth.isUnlocked) {
+        rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+      }
       _lastTimeoutMinutes = settings.autoLockMinutes;
       _wasUnlocked = auth.isUnlocked;
       _resetInactivityTimer();
@@ -216,6 +248,7 @@ class VaultLifecycleShellState extends State<VaultLifecycleShell>
   void dispose() {
     _inactivityTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
+    _browserBridge?.stop();
     super.dispose();
   }
 

@@ -224,20 +224,33 @@ void main() {
       print('Generic "com" matched bankofamerica.com: $genericMatched');
     });
 
-    test('PROBE 6: POST /pair unauthenticated token disclosure', () async {
+    test('PROBE 6: POST /pair unauthenticated token disclosure is remediated', () async {
       await bridge.start(port: 0);
 
-      // Any caller without auth header or user confirmation gets the active token
+      // Any caller without pairing PIN or user confirmation is rejected with HTTP 401
       final res = await http.post(
         Uri.parse('${bridge.baseUrl}/pair'),
         headers: {
           'Origin': 'chrome-extension://unauthorized-attacker-extension-id',
         },
       );
-      expect(res.statusCode, HttpStatus.ok);
+      expect(res.statusCode, HttpStatus.unauthorized);
       final body = jsonDecode(res.body) as Map<String, dynamic>;
-      expect(body['token'], 'adv-token-999');
-      print('CONFIRMED: /pair returns active pairing token without user interaction or approval!');
+      expect(body['error'], contains('Pairing authorization required'));
+      print('CONFIRMED: /pair rejects unauthenticated requests with HTTP 401!');
+
+      // Authorized caller with valid pairing PIN receives token
+      final resValid = await http.post(
+        Uri.parse('${bridge.baseUrl}/pair'),
+        headers: {
+          'Origin': 'chrome-extension://legit-extension-id',
+        },
+        body: jsonEncode({'code': bridge.pairingCode}),
+      );
+      expect(resValid.statusCode, HttpStatus.ok);
+      final bodyValid = jsonDecode(resValid.body) as Map<String, dynamic>;
+      expect(bodyValid['token'], 'adv-token-999');
+      print('CONFIRMED: /pair returns active pairing token upon valid PIN verification.');
     });
 
     test('PROBE 7: Edge extension origin support vs rejection', () async {

@@ -553,5 +553,55 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       auth.dispose();
     });
+
+    testWidgets('lockVault pops subroutes, dialogs and editors back to root Navigator', (tester) async {
+      final fakeBio = FakeBiometricService();
+      final auth = AuthProvider(
+        biometricService: fakeBio,
+        securityLogService: FakeSecurityLogService(),
+        navigatorKey: rootNavigatorKey,
+      );
+      final settings = SettingsProvider();
+      await settings.load();
+
+      final masterKey = List<int>.generate(32, (i) => i);
+      fakeBio.keyToReturn = masterKey;
+      await auth.unlockWithBiometrics();
+      expect(auth.isUnlocked, isTrue);
+
+      await tester.pumpWidget(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider<AuthProvider>.value(value: auth),
+            ChangeNotifierProvider<SettingsProvider>.value(value: settings),
+          ],
+          child: MaterialApp(
+            navigatorKey: rootNavigatorKey,
+            home: const Scaffold(body: Text('Root Screen')),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // Push a sub-route (e.g. CredentialEditorScreen mock)
+      rootNavigatorKey.currentState!.push(
+        MaterialPageRoute(
+          builder: (_) => const Scaffold(body: Text('Sensitive Credential Editor')),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Sensitive Credential Editor'), findsOneWidget);
+
+      // Now lock the vault
+      auth.lockVault();
+      await tester.pumpAndSettle();
+
+      // Verify sub-route was popped back to root
+      expect(find.text('Sensitive Credential Editor'), findsNothing);
+      expect(find.text('Root Screen'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      auth.dispose();
+    });
   });
 }

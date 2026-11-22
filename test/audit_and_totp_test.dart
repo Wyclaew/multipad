@@ -1,9 +1,12 @@
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:multipad/constants.dart';
 import 'package:multipad/models/vault_item.dart';
 import 'package:multipad/providers/auth_provider.dart';
 import 'package:multipad/providers/settings_provider.dart';
 import 'package:multipad/services/audit_service.dart';
 import 'package:multipad/services/totp_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   group('AuditService Card & Website & Vault checks', () {
@@ -177,6 +180,130 @@ void main() {
         expect(p >= 30 && p <= 90, isTrue);
         expect(p % 30 == 0, isTrue);
       }
+    });
+
+    test('saveTwoFactorVerification signs timestamp with dynamic device key and verifies integrity', () async {
+      FlutterSecureStorage.setMockInitialValues({});
+      SharedPreferences.setMockInitialValues({});
+
+      final auth = AuthProvider();
+      final now = DateTime.utc(2026, 6, 1, 12, 0, 0);
+
+      await auth.saveTwoFactorVerification(now);
+      expect(auth.twoFactorLastVerified, equals(now));
+      expect(auth.isTwoFactorSignatureValid, isTrue);
+
+      final valid = await auth.verifyTwoFactorTimestampIntegrity();
+      expect(valid, isTrue);
+      expect(auth.isTwoFactorSignatureValid, isTrue);
+    });
+
+    test('tampered 2FA timestamp resets twoFactorLastVerified to null in _loadSecurityPreferences', () async {
+      FlutterSecureStorage.setMockInitialValues({
+        AppConstants.keyTwoFactorLastVerifiedIso: '2026-06-01T12:00:00.000Z',
+        'multipad_2fa_hmac_signature_v1': 'invalid_forged_signature_xyz',
+      });
+      SharedPreferences.setMockInitialValues({
+        AppConstants.keyTwoFactorLastVerifiedIso: '2099-01-01T00:00:00.000Z',
+      });
+
+      final auth = AuthProvider();
+      await auth.refreshSecurityState();
+
+      expect(auth.twoFactorLastVerified, isNull);
+      expect(auth.isTwoFactorSignatureValid, isFalse);
+      expect(auth.isTwoFactorPromptDue(), isTrue);
+    });
+  });
+
+  group('VaultItem Memory Hardening & Secret Zeroing', () {
+    test('wipeSecrets zeroes out all sensitive credential fields, passkeys, and collections', () {
+      final passkey = VaultPasskey(
+        id: 'pk1',
+        credentialId: 'c1',
+        rpId: 'example.com',
+        userName: 'user@example.com',
+        privateKey: 'SECRET_PRIVATE_KEY_BYTES_HERE',
+        createdAt: DateTime.utc(2026, 1, 1),
+      );
+
+      final item = VaultItem(
+        id: 'test_item_1',
+        type: VaultItemType.credential,
+        title: 'Bank Portal',
+        username: 'admin',
+        password: 'SuperSecretPassword!2026',
+        content: 'Secret Markdown Note Content',
+        totpSecret: 'JBSWY3DPEHPK3PXP',
+        cardNumber: '4111111111111111',
+        cardCvv: '999',
+        cardPin: '1234',
+        wifiPassword: 'WifiSecretPassword',
+        serverPassword: 'SshSecretPassword',
+        databasePassword: 'DbSecretPassword',
+        serverKey: 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQAB...',
+        licenseKey: 'PROD-KEY-1234-5678',
+        cryptoSeedPhrase: 'apple banana cherry dog elephant fox grape horse',
+        passkeys: [passkey],
+        passwordHistory: ['OldPass1', 'OldPass2'],
+        customFields: [
+          const CustomField(id: 'cf1', label: 'PIN2', value: '4321', isHidden: true),
+        ],
+        attachments: [
+          VaultAttachmentMeta(
+            id: 'att1',
+            fileName: 'secret.pdf',
+            mimeType: 'application/pdf',
+            sizeBytes: 1024,
+            sha256: 'abc',
+            createdAt: DateTime.now(),
+          ),
+        ],
+        revisions: [
+          VaultItemRevision(
+            id: 'rev1',
+            savedAt: DateTime.now(),
+            title: 'old revision',
+            summary: 'old rev',
+          ),
+        ],
+      );
+
+      expect(item.isWiped, isFalse);
+      expect(item.password, 'SuperSecretPassword!2026');
+      expect(item.cardNumber, '4111111111111111');
+      expect(item.cardCvv, '999');
+      expect(item.cardPin, '1234');
+      expect(item.cryptoSeedPhrase, contains('apple banana'));
+      expect(item.totpSecret, 'JBSWY3DPEHPK3PXP');
+      expect(passkey.privateKey, 'SECRET_PRIVATE_KEY_BYTES_HERE');
+
+      // Wipe secrets
+      item.wipeSecrets();
+
+      expect(item.isWiped, isTrue);
+      expect(item.password, isEmpty);
+      expect(item.content, isEmpty);
+      expect(item.cardNumber, isEmpty);
+      expect(item.cardCvv, isEmpty);
+      expect(item.cardPin, isEmpty);
+      expect(item.cryptoSeedPhrase, isEmpty);
+      expect(item.totpSecret, isEmpty);
+      expect(item.wifiPassword, isEmpty);
+      expect(item.serverPassword, isEmpty);
+      expect(item.databasePassword, isEmpty);
+      expect(item.serverKey, isEmpty);
+      expect(item.licenseKey, isEmpty);
+
+      // Passkey private key scrubbed and list cleared
+      expect(passkey.privateKey, isEmpty);
+      expect(item.passkeys, isEmpty);
+
+      // Subcollections cleared
+      expect(item.passwordHistory, isEmpty);
+      expect(item.customFields, isEmpty);
+      expect(item.attachments, isEmpty);
+      expect(item.revisions, isEmpty);
     });
   });
 

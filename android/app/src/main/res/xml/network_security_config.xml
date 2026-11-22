@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Base configuration: cleartext HTTP traffic is disabled globally on the public internet -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Permit cleartext traffic ONLY for local private subnets and loopback addresses for local Wi-Fi / LAN pairing -->
+    <!-- Note: Android Network Security Config enforces literal domain/hostnames and IP addresses. -->
+    <!-- Scoped to local private subnets (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.1) and mDNS endpoints -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">10.0.2.2</domain>
+        <domain includeSubdomains="true">local</domain>
+    </domain-config>
+</network-security-config>

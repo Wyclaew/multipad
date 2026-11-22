@@ -83,10 +83,46 @@ class CryptoService {
       if (parts.length != 6) {
         throw const FormatException('Invalid Argon2id salt format');
       }
-      final memoryKib = int.parse(parts[2].substring(1));
-      final iterations = int.parse(parts[3].substring(1));
-      final parallelism = int.parse(parts[4].substring(1));
-      final saltBytes = base64Decode(parts[5]);
+      if (!parts[2].startsWith('m') ||
+          !parts[3].startsWith('t') ||
+          !parts[4].startsWith('p')) {
+        throw const FormatException('Invalid Argon2id parameter prefixes');
+      }
+      final memoryKib = int.tryParse(parts[2].substring(1));
+      final iterations = int.tryParse(parts[3].substring(1));
+      final parallelism = int.tryParse(parts[4].substring(1));
+      if (memoryKib == null || iterations == null || parallelism == null) {
+        throw const FormatException('Invalid Argon2id parameter integer values');
+      }
+
+      // Bounds validation: minimum salt length >= 16 bytes, iterations >= 1, memory >= 16MB (16384 KiB)
+      const minMemoryKib = 16384; // 16 MB in KiB
+      if (memoryKib < minMemoryKib) {
+        throw const FormatException('Argon2id memory must be at least 16MB (16384 KiB)');
+      }
+      if (memoryKib > 1048576) {
+        throw const FormatException('Argon2id memory exceeds safe limit (1048576 KiB)');
+      }
+      if (iterations < 1) {
+        throw const FormatException('Argon2id iterations must be at least 1');
+      }
+      if (iterations > 100) {
+        throw const FormatException('Argon2id iterations exceed safe limit (100)');
+      }
+      if (parallelism < 1 || parallelism > 32) {
+        throw const FormatException('Argon2id parallelism out of bounds [1, 32]');
+      }
+
+      Uint8List saltBytes;
+      try {
+        saltBytes = base64Decode(parts[5]);
+      } catch (e) {
+        throw FormatException('Invalid Argon2id base64 salt: $e');
+      }
+
+      if (saltBytes.length < 16) {
+        throw const FormatException('Argon2id salt length must be at least 16 bytes');
+      }
 
       final argon2 = Argon2id(
         memory: memoryKib,
@@ -116,12 +152,12 @@ class CryptoService {
     return Uint8List.fromList(extracted);
   }
 
-  /// Derives a 256-bit wrapping key from a local PIN using PBKDF2.
+  /// Derives a 256-bit wrapping key from a local PIN using PBKDF2 (hardened with 250,000 iterations).
   Future<Uint8List> derivePinWrappingKey(String pin, String saltBase64) async {
     return Isolate.run(() async {
       final pbkdf2 = Pbkdf2(
         macAlgorithm: Hmac.sha256(),
-        iterations: 50000,
+        iterations: 250000,
         bits: 256,
       );
       final secretKey = await pbkdf2.deriveKey(

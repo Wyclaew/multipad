@@ -52,7 +52,7 @@ void main() {
       expect(res1.statusCode, 200);
       final json1 = jsonDecode(res1.body) as Map<String, dynamic>;
       expect(json1['status'], 'unlocked');
-      expect(json1['version'], '1.3.0');
+      expect(json1['version'], '1.3.1');
 
       // Locked
       unlocked = false;
@@ -62,16 +62,39 @@ void main() {
       expect(json2['status'], 'locked');
     });
 
-    test('POST /pair and /api/v1/pair return active pairing token', () async {
+    test('POST /pair and /api/v1/pair require valid pairing PIN and extension origin', () async {
       await bridge.start(port: 0);
 
-      final res = await http.post(Uri.parse('${bridge.baseUrl}/pair'));
-      expect(res.statusCode, 200);
+      // Rejects without pairing code with HTTP 401
+      final resNoCode = await http.post(
+        Uri.parse('${bridge.baseUrl}/pair'),
+        headers: {'Origin': 'chrome-extension://myextension'},
+      );
+      expect(resNoCode.statusCode, HttpStatus.unauthorized);
+
+      // Rejects without extension origin with HTTP 403
+      final resNoOrigin = await http.post(
+        Uri.parse('${bridge.baseUrl}/pair'),
+        body: jsonEncode({'code': bridge.pairingCode}),
+      );
+      expect(resNoOrigin.statusCode, HttpStatus.forbidden);
+
+      // Succeeds with valid code and extension origin
+      final res = await http.post(
+        Uri.parse('${bridge.baseUrl}/pair'),
+        headers: {'Origin': 'chrome-extension://myextension'},
+        body: jsonEncode({'code': bridge.pairingCode}),
+      );
+      expect(res.statusCode, HttpStatus.ok);
       final json = jsonDecode(res.body) as Map<String, dynamic>;
       expect(json['token'], 'test-token-xyz-123');
 
       bridge.rotatePairingToken();
-      final res2 = await http.post(Uri.parse('${bridge.baseUrl}/api/v1/pair'));
+      final res2 = await http.post(
+        Uri.parse('${bridge.baseUrl}/api/v1/pair'),
+        headers: {'Origin': 'chrome-extension://myextension'},
+        body: jsonEncode({'code': bridge.pairingCode}),
+      );
       final json2 = jsonDecode(res2.body) as Map<String, dynamic>;
       expect(json2['token'], isNot('test-token-xyz-123'));
     });
@@ -537,6 +560,113 @@ void main() {
 
       expect(res.statusCode, HttpStatus.badRequest);
       expect(jsonDecode(res.body)['error'], 'Malformed JSON payload');
+    });
+
+    test('POST /capture deduplicates credential for same domain and username', () async {
+      final existing = VaultItem(
+        id: 'existing-id-1',
+        type: VaultItemType.credential,
+        title: 'example.com',
+        website: 'https://example.com/login',
+        username: 'alice',
+        password: 'OldPassword123!',
+      );
+      final activeList = [existing];
+      VaultItem? saved;
+
+      final dedupBridge = BrowserBridgeService(
+        isUnlocked: () => true,
+        getItems: () => activeList,
+        initialToken: 'token-dedup',
+        onSaveItem: (item) async => saved = item,
+      );
+      await dedupBridge.start(port: 0);
+
+      // Same password -> no duplicate item added
+      final resSame = await http.post(
+        Uri.parse('${dedupBridge.baseUrl}/capture'),
+        headers: {'Authorization': 'Bearer token-dedup'},
+        body: jsonEncode({
+          'url': 'https://example.com/login',
+          'username': 'alice',
+          'password': 'OldPassword123!',
+        }),
+      );
+      expect(resSame.statusCode, HttpStatus.created);
+      expect(saved, isNull);
+
+      // Changed password -> updates existing item preserving id
+      final resUpdated = await http.post(
+        Uri.parse('${dedupBridge.baseUrl}/capture'),
+        headers: {'Authorization': 'Bearer token-dedup'},
+        body: jsonEncode({
+          'url': 'https://example.com/login',
+          'username': 'alice',
+          'password': 'NewPassword456!',
+        }),
+      );
+      expect(resUpdated.statusCode, HttpStatus.created);
+      expect(saved, isNotNull);
+      expect(saved!.id, 'existing-id-1');
+      expect(saved!.password, 'NewPassword456!');
+
+      await dedupBridge.stop();
+    });
+
+    test('query returns empty string for totp if code generation fails, never leaking raw secret', () async {
+      final badTotpItem = VaultItem(
+        id: 'bad-totp-1',
+        type: VaultItemType.credential,
+        title: 'Bad TOTP',
+        website: 'https://badseed.com',
+        username: 'user',
+        password: 'pass',
+        totpSecret: 'INVALID_BASE32_!@#\$%^&*()',
+      );
+      final totpBridge = BrowserBridgeService(
+        isUnlocked: () => true,
+        getItems: () => [badTotpItem],
+        initialToken: 'token-bad-totp',
+      );
+      await totpBridge.start(port: 0);
+
+      final res = await http.post(
+        Uri.parse('${totpBridge.baseUrl}/query'),
+        headers: {'Authorization': 'Bearer token-bad-totp'},
+        body: jsonEncode({'url': 'https://badseed.com'}),
+      );
+      expect(res.statusCode, HttpStatus.ok);
+      final json = jsonDecode(res.body) as Map<String, dynamic>;
+      final matches = json['matches'] as List<dynamic>;
+      expect(matches.length, 1);
+      expect(matches.first['totp'], '');
+      expect(matches.first['totp'], isNot(badTotpItem.totpSecret));
+
+      await totpBridge.stop();
+    });
+
+    test('enforces 256 KB maximum request body size limit (DoS protection)', () async {
+      await bridge.start(port: 0);
+
+      // Payload > 256 KB
+      final hugeData = 'a' * (257 * 1024);
+      final res = await http.post(
+        Uri.parse('${bridge.baseUrl}/query'),
+        headers: {'Authorization': 'Bearer test-token-xyz-123'},
+        body: jsonEncode({'url': 'https://example.com', 'padding': hugeData}),
+      );
+      expect(res.statusCode, HttpStatus.requestEntityTooLarge); // 413
+    });
+
+    test('rejects DNS rebinding / unauthorized Host header with HTTP 403', () async {
+      await bridge.start(port: 0);
+
+      final client = HttpClient();
+      final request = await client.getUrl(Uri.parse('${bridge.baseUrl}/status'));
+      request.headers.set('Host', 'evil.attacker.com:48292');
+      final response = await request.close();
+      expect(response.statusCode, HttpStatus.forbidden);
+      client.close();
     });
 
     test('returns HTTP 404 for unknown endpoints', () async {

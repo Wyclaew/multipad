@@ -191,17 +191,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderCredentials(filtered);
   });
 
+  const pairingCodeInput = document.getElementById('pairingCodeInput');
+
   // Pairing button event
   pairBtn.addEventListener('click', () => {
     pairBtn.disabled = true;
     pairBtn.innerText = 'Pairing...';
-    chrome.runtime.sendMessage({ action: 'PAIR' }, (res) => {
+    const code = pairingCodeInput ? pairingCodeInput.value.trim() : '';
+    chrome.runtime.sendMessage({ action: 'PAIR', code: code }, (res) => {
       pairBtn.disabled = false;
       pairBtn.innerText = 'Pair with MultiPad';
       if (res && res.success) {
         checkState();
       } else {
-        alert(res ? res.error : 'Pairing failed. Make sure MultiPad desktop is open.');
+        alert(res ? res.error : 'Pairing failed. Make sure MultiPad desktop is open and pairing PIN is correct.');
       }
     });
   });

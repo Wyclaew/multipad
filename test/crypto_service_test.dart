@@ -60,6 +60,43 @@ void main() {
       CryptoService.wipe(pinKey2);
       CryptoService.wipe(pinKeyWrong);
     });
+
+    test('validates Argon2id parameter bounds and rejects undersized/oversized inputs', () async {
+      // Memory < 16MB (16384 KiB)
+      const lowMemSalt = 'v2:argon2id:m8192:t2:p1:c2FsdF9ieXRlc18xNmJ5dGVz';
+      await expectLater(
+        () => crypto.deriveMasterKey('Password123!', lowMemSalt),
+        throwsA(isA<FormatException>()),
+      );
+
+      // Iterations < 1
+      const zeroIterSalt = 'v2:argon2id:m19456:t0:p1:c2FsdF9ieXRlc18xNmJ5dGVz';
+      await expectLater(
+        () => crypto.deriveMasterKey('Password123!', zeroIterSalt),
+        throwsA(isA<FormatException>()),
+      );
+
+      // Salt length < 16 bytes (8 bytes)
+      const shortSalt = 'v2:argon2id:m19456:t2:p1:c2hvcnQxMg==';
+      await expectLater(
+        () => crypto.deriveMasterKey('Password123!', shortSalt),
+        throwsA(isA<FormatException>()),
+      );
+
+      // Invalid format / prefixes
+      const invalidPrefixSalt = 'v2:argon2id:x19456:t2:p1:c2FsdF9ieXRlc18xNmJ5dGVz';
+      await expectLater(
+        () => crypto.deriveMasterKey('Password123!', invalidPrefixSalt),
+        throwsA(isA<FormatException>()),
+      );
+
+      // Valid bounds: 16MB memory, 1 iteration, >=16 bytes salt
+      // 'c2FsdF9ieXRlc18xNmJ5dGVz' is 'salt_bytes_16bytes' (18 bytes)
+      const validSalt = 'v2:argon2id:m16384:t1:p1:c2FsdF9ieXRlc18xNmJ5dGVz';
+      final derivedKey = await crypto.deriveMasterKey('ValidPass!2026', validSalt);
+      expect(derivedKey.length, 32);
+      CryptoService.wipe(derivedKey);
+    });
   });
 
   group('CryptoService AES-256-GCM', () {

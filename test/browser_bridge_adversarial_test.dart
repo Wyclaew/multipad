@@ -864,4 +864,150 @@ void main() {
       expect(bridge.isRunning, isFalse);
     });
   });
+
+  group('Adversarial Test Suite 8: Host Header Spoofing, Payload Size Limits & SEC-CRIT-1 Pairing Hardening', () {
+    late BrowserBridgeService bridge;
+    late List<VaultItem> testItems;
+    VaultItem? lastSavedItem;
+
+    setUp(() async {
+      lastSavedItem = null;
+      testItems = [
+        VaultItem(
+          id: 'existing-cred-1',
+          type: VaultItemType.credential,
+          title: 'GitHub',
+          website: 'https://github.com',
+          username: 'octocat',
+          password: 'OriginalPassword123!',
+          totpSecret: r'NOT_VALID_BASE_32!@#$',
+        ),
+      ];
+      bridge = BrowserBridgeService(
+        isUnlocked: () => true,
+        getItems: () => testItems,
+        initialToken: 'suite8-token-2026',
+        initialPairingCode: '987654',
+        onSaveItem: (item) async => lastSavedItem = item,
+      );
+      await bridge.start(port: 0);
+    });
+
+    tearDown(() async {
+      if (bridge.isRunning) await bridge.stop();
+    });
+
+    test('rejects external/spoofed Host headers across status, pair, and query with HTTP 403 (DNS Rebinding)', () async {
+      final client = HttpClient();
+      final badHosts = [
+        'evil.attacker.com',
+        'evil.attacker.com:48292',
+        'rebind.evil.org',
+        '192.168.1.100:${bridge.port}',
+        '0.0.0.0:${bridge.port}',
+      ];
+
+      for (final badHost in badHosts) {
+        final req = await client.getUrl(Uri.parse('${bridge.baseUrl}/status'));
+        req.headers.set('Host', badHost);
+        final resp = await req.close();
+        expect(resp.statusCode, HttpStatus.forbidden,
+            reason: 'Host "$badHost" must be blocked by DNS rebinding filter');
+      }
+      client.close();
+    });
+
+    test('SEC-CRIT-1: POST /pair strictly rejects requests without valid pairing PIN (HTTP 401)', () async {
+      // No body
+      final resEmpty = await http.post(
+        Uri.parse('${bridge.baseUrl}/pair'),
+        headers: {'Origin': 'chrome-extension://legit-ext'},
+      );
+      expect(resEmpty.statusCode, HttpStatus.unauthorized);
+
+      // Wrong PIN
+      final resWrong = await http.post(
+        Uri.parse('${bridge.baseUrl}/pair'),
+        headers: {'Origin': 'chrome-extension://legit-ext'},
+        body: jsonEncode({'code': '000000'}),
+      );
+      expect(resWrong.statusCode, HttpStatus.unauthorized);
+      final json = jsonDecode(resWrong.body) as Map<String, dynamic>;
+      expect(json['error'], contains('Pairing authorization required'));
+
+      // Empty Origin rejected with HTTP 403
+      final resNoOrigin = await http.post(
+        Uri.parse('${bridge.baseUrl}/pair'),
+        body: jsonEncode({'code': '987654'}),
+      );
+      expect(resNoOrigin.statusCode, HttpStatus.forbidden);
+
+      // Valid PIN + extension origin succeeds with HTTP 200 and issues token
+      final resSuccess = await http.post(
+        Uri.parse('${bridge.baseUrl}/pair'),
+        headers: {'Origin': 'chrome-extension://legit-ext'},
+        body: jsonEncode({'code': '987654'}),
+      );
+      expect(resSuccess.statusCode, HttpStatus.ok);
+      final successJson = jsonDecode(resSuccess.body) as Map<String, dynamic>;
+      expect(successJson['token'], 'suite8-token-2026');
+    });
+
+    test('enforces 256 KB max payload ceiling against memory exhaustion DoS (HTTP 413)', () async {
+      final hugePayload = 'X' * (260 * 1024); // 260 KB
+      final res = await http.post(
+        Uri.parse('${bridge.baseUrl}/capture'),
+        headers: {'Authorization': 'Bearer suite8-token-2026'},
+        body: jsonEncode({'url': 'https://github.com', 'blob': hugePayload}),
+      );
+      expect(res.statusCode, HttpStatus.requestEntityTooLarge);
+    });
+
+    test('corrupted or invalid TOTP secret never leaks raw seed to extension (returns empty string)', () async {
+      final res = await http.post(
+        Uri.parse('${bridge.baseUrl}/query'),
+        headers: {'Authorization': 'Bearer suite8-token-2026'},
+        body: jsonEncode({'url': 'https://github.com'}),
+      );
+      expect(res.statusCode, HttpStatus.ok);
+      final json = jsonDecode(res.body) as Map<String, dynamic>;
+      final matches = json['matches'] as List<dynamic>;
+      expect(matches.length, 1);
+      final match = matches.first as Map<String, dynamic>;
+      expect(match['totp'], equals(''), reason: 'Corrupt seed must return empty string, never the raw secret');
+    });
+
+    test('POST /capture deduplicates against existing credentials, updating password without creating duplicate ID', () async {
+      // 1. Submit matching domain and username with updated password
+      final resUpdate = await http.post(
+        Uri.parse('${bridge.baseUrl}/capture'),
+        headers: {'Authorization': 'Bearer suite8-token-2026'},
+        body: jsonEncode({
+          'url': 'https://github.com/login',
+          'username': 'octocat',
+          'password': 'UpdatedPassword2026!',
+        }),
+      );
+      expect(resUpdate.statusCode, HttpStatus.created);
+      expect(lastSavedItem, isNotNull);
+      expect(lastSavedItem!.id, 'existing-cred-1', reason: 'Must update existing item, not generate new UUID');
+      expect(lastSavedItem!.password, 'UpdatedPassword2026!');
+
+      // Reset save tracker
+      lastSavedItem = null;
+
+      // 2. Submit identical credentials (no changes) -> deduplication skips redundant save
+      final resIdentical = await http.post(
+        Uri.parse('${bridge.baseUrl}/capture'),
+        headers: {'Authorization': 'Bearer suite8-token-2026'},
+        body: jsonEncode({
+          'url': 'https://github.com/login',
+          'username': 'octocat',
+          'password': 'OriginalPassword123!',
+        }),
+      );
+      expect(resIdentical.statusCode, HttpStatus.created);
+      expect(lastSavedItem, isNull, reason: 'Identical password submission must not trigger redundant save');
+    });
+  });
 }

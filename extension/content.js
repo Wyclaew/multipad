@@ -104,11 +104,21 @@
     hideSuggestions();
   }
 
+  let overlayHost = null;
+
   function showSuggestions(targetInput, usernameInput, pwdInput) {
     hideSuggestions();
     if (matchedCredentials.length === 0) return;
 
     const rect = targetInput.getBoundingClientRect();
+
+    overlayHost = document.createElement('div');
+    overlayHost.id = 'multipad-autofill-host';
+    overlayHost.style.cssText = 'position: absolute; top: 0; left: 0; width: 0; height: 0; z-index: 2147483647;';
+
+    // Attach closed Shadow DOM so in-page scripts cannot inspect or read credential overlay elements
+    const shadowRoot = overlayHost.attachShadow({ mode: 'closed' });
+
     autofillOverlay = document.createElement('div');
     autofillOverlay.className = 'multipad-autofill-dropdown';
     autofillOverlay.style.cssText = `
@@ -157,12 +167,14 @@
       autofillOverlay.appendChild(item);
     }
 
-    document.body.appendChild(autofillOverlay);
+    shadowRoot.appendChild(autofillOverlay);
+    document.body.appendChild(overlayHost);
   }
 
   function hideSuggestions() {
-    if (autofillOverlay && autofillOverlay.parentNode) {
-      autofillOverlay.parentNode.removeChild(autofillOverlay);
+    if (overlayHost && overlayHost.parentNode) {
+      overlayHost.parentNode.removeChild(overlayHost);
+      overlayHost = null;
       autofillOverlay = null;
     }
   }
@@ -206,19 +218,32 @@
     if (usernameInput) handleFocus(usernameInput);
     if (pwdInput) handleFocus(pwdInput);
 
-    // Submission capture
+    // Submission capture with debouncing across overlapping submit/click/enter events
+    let lastCaptureTime = 0;
+    let lastCapturedKey = '';
+
     const captureSubmission = () => {
       const username = usernameInput ? usernameInput.value.trim() : '';
       const password = pwdInput ? pwdInput.value : '';
 
-      if (password && (username || password.length >= 6)) {
-        chrome.runtime.sendMessage({
-          action: 'CAPTURE_CREDENTIAL',
-          url: window.location.origin,
-          username: username,
-          password: password,
-        });
+      if (!password || (!username && password.length < 6)) {
+        return;
       }
+
+      const now = Date.now();
+      const captureKey = `${username}:${password}:${window.location.origin}`;
+      if (now - lastCaptureTime < 2000 && lastCapturedKey === captureKey) {
+        return; // Debounce identical capture within 2s window
+      }
+      lastCaptureTime = now;
+      lastCapturedKey = captureKey;
+
+      chrome.runtime.sendMessage({
+        action: 'CAPTURE_CREDENTIAL',
+        url: window.location.origin,
+        username: username,
+        password: password,
+      });
     };
 
     if (form) {

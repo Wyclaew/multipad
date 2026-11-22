@@ -3,15 +3,44 @@
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:48292';
 
 async function getStoredConfig() {
-  const data = await chrome.storage.local.get(['pairingToken', 'bridgeUrl']);
+  let pairingToken = '';
+  let bridgeUrl = DEFAULT_BRIDGE_URL;
+
+  // Prefer in-memory session storage for sensitive pairing token when available
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.session) {
+    try {
+      const sData = await chrome.storage.session.get(['pairingToken', 'bridgeUrl']);
+      if (sData && sData.pairingToken) pairingToken = sData.pairingToken;
+      if (sData && sData.bridgeUrl) bridgeUrl = sData.bridgeUrl;
+    } catch (_) {}
+  }
+
+  // Fallback to local storage if not in session
+  if (!pairingToken && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    try {
+      const lData = await chrome.storage.local.get(['pairingToken', 'bridgeUrl']);
+      if (lData && lData.pairingToken) pairingToken = lData.pairingToken;
+      if (lData && lData.bridgeUrl) bridgeUrl = lData.bridgeUrl;
+    } catch (_) {}
+  }
+
   return {
-    pairingToken: data.pairingToken || '',
-    bridgeUrl: data.bridgeUrl || DEFAULT_BRIDGE_URL,
+    pairingToken,
+    bridgeUrl,
   };
 }
 
 async function setStoredToken(token) {
-  await chrome.storage.local.set({ pairingToken: token });
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.session) {
+    try {
+      await chrome.storage.session.set({ pairingToken: token });
+    } catch (_) {}
+  }
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    try {
+      await chrome.storage.local.set({ pairingToken: token });
+    } catch (_) {}
+  }
 }
 
 async function updateBadge(status) {
@@ -54,18 +83,30 @@ async function fetchBridgeStatus() {
   }
 }
 
-async function pairBridge() {
+async function pairBridge(code = '') {
   const { bridgeUrl } = await getStoredConfig();
   try {
     let res = await fetch(`${bridgeUrl}/api/v1/pair`, {
       method: 'POST',
-      headers: { 'Accept': 'application/json' },
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ code: code }),
     });
-    if (!res.ok) {
-      res = await fetch(`${bridgeUrl}/pair`, { method: 'POST' });
+    if (!res.ok && res.status === 404) {
+      res = await fetch(`${bridgeUrl}/pair`, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ code: code }),
+      });
     }
     if (!res.ok) {
-      return { success: false, error: `Pairing failed: HTTP ${res.status}` };
+      const errData = await res.json().catch(() => ({}));
+      return { success: false, error: errData.error || `Pairing failed: HTTP ${res.status}` };
     }
     const data = await res.json();
     if (data.token) {
@@ -176,18 +217,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'CHECK_STATUS':
         sendResponse(await fetchBridgeStatus());
         break;
+
       case 'PAIR':
-        sendResponse(await pairBridge());
+        // Protect PAIR so in-page content scripts cannot trigger pairing
+        if (sender && sender.tab) {
+          sendResponse({ success: false, error: 'Unauthorized: content scripts cannot initiate pairing' });
+          break;
+        }
+        sendResponse(await pairBridge(message.code));
         break;
-      case 'QUERY_CREDENTIALS':
-        sendResponse(await queryCredentials(message.url));
+
+      case 'QUERY_CREDENTIALS': {
+        // Confused deputy protection: authenticate domain via browser-verified sender.tab.url
+        const targetUrl = (sender && sender.tab && sender.tab.url)
+          ? sender.tab.url
+          : (message.url || '');
+        sendResponse(await queryCredentials(targetUrl));
         break;
-      case 'CAPTURE_CREDENTIAL':
-        sendResponse(await captureCredential(message.url, message.username, message.password));
+      }
+
+      case 'CAPTURE_CREDENTIAL': {
+        const targetUrl = (sender && sender.tab && sender.tab.url)
+          ? sender.tab.url
+          : (message.url || '');
+        sendResponse(await captureCredential(targetUrl, message.username, message.password));
         break;
+      }
+
       case 'GET_CONFIG':
+        // Protect GET_CONFIG so untrusted content scripts cannot extract pairing tokens
+        if (sender && sender.tab) {
+          sendResponse({ error: 'Unauthorized: content scripts cannot access configuration' });
+          break;
+        }
         sendResponse(await getStoredConfig());
         break;
+
       default:
         sendResponse({ error: 'Unknown action' });
     }
