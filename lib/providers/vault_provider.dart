@@ -276,9 +276,6 @@ class VaultProvider with ChangeNotifier {
     _subscription = null;
     invalidateAuditReport();
 
-    // Clear autofill hardware keystore cache
-    NativeBridgeService.clearAutofillIndex();
-
     // Clear decoded image memory buffers
     try {
       PaintingBinding.instance.imageCache.clear();
@@ -1518,13 +1515,21 @@ class VaultProvider with ChangeNotifier {
 
   /// Updates the hardware-keystore-encrypted Android Autofill credential cache.
   Future<void> syncAutofillIndex(bool enabled) async {
-    if (kIsWeb || !Platform.isAndroid) return;
-    if (!enabled || !_isActive || _isDuressMode || _masterKey == null) {
+    if (kIsWeb) return;
+    if (!Platform.isAndroid &&
+        !Platform.environment.containsKey('FLUTTER_TEST')) {
+      return;
+    }
+    if (!enabled || _isDuressMode) {
       await NativeBridgeService.clearAutofillIndex();
       return;
     }
+    if (!_isActive || _masterKey == null) {
+      // Retain existing hardware-encrypted Keystore index while vault is locked
+      return;
+    }
     final entries = items
-        .where((i) => i.type == VaultItemType.credential)
+        .where((i) => i.type == VaultItemType.credential && !i.isTrash)
         .map(
           (i) => {
             'id': i.id,

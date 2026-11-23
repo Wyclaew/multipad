@@ -208,6 +208,22 @@ class MainActivity : FlutterFragmentActivity() {
                         result.success(true)
                     }
 
+                    "isAccessibilityServiceEnabled" -> {
+                        result.success(MultiPadAccessibilityService.isRunning)
+                    }
+
+                    "openAccessibilitySettings" -> {
+                        try {
+                            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            startActivity(intent)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("OPEN_ACCESSIBILITY_ERROR", e.localizedMessage ?: e.toString(), null)
+                        }
+                    }
+
                     "installApk" -> {
                         val path = call.argument<String>("path")
                         if (path.isNullOrBlank()) {

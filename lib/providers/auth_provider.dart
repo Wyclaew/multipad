@@ -1451,9 +1451,6 @@ class AuthProvider with ChangeNotifier {
       PaintingBinding.instance.imageCache.clearLiveImages();
     } catch (_) {}
 
-    // Flush native autofill index
-    NativeBridgeService.clearAutofillIndex();
-
     // Pause centralized TOTP ticker
     TotpTickerService.instance.pause();
 

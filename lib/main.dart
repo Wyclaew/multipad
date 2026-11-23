@@ -10,6 +10,7 @@ import 'providers/settings_provider.dart';
 import 'providers/vault_provider.dart';
 import 'screens/auth_screen.dart';
 import 'screens/home_screen.dart';
+import 'screens/splash_screen.dart';
 import 'services/browser_bridge_service.dart';
 import 'services/native_bridge_service.dart';
 import 'services/pending_capture_coordinator.dart';
@@ -21,7 +22,7 @@ final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const MultiPadApp());
+  runApp(const MultiPadApp(showSplash: true));
 }
 
 class MultiPadApp extends StatelessWidget {
@@ -29,6 +30,7 @@ class MultiPadApp extends StatelessWidget {
   final SettingsProvider? settingsProvider;
   final VaultProvider? vaultProvider;
   final Widget? home;
+  final bool showSplash;
 
   const MultiPadApp({
     super.key,
@@ -36,6 +38,7 @@ class MultiPadApp extends StatelessWidget {
     this.settingsProvider,
     this.vaultProvider,
     this.home,
+    this.showSplash = false,
   });
 
   ThemeData _buildTheme(Brightness brightness, {bool amoled = false}) {
@@ -403,7 +406,15 @@ class MultiPadApp extends StatelessWidget {
               );
             },
             home: home ??
-                (auth.isUnlocked ? const HomeScreen() : const AuthScreen()),
+                (showSplash
+                    ? SplashScreen(
+                        nextScreen: auth.isUnlocked
+                            ? const HomeScreen()
+                            : const AuthScreen(),
+                      )
+                    : (auth.isUnlocked
+                        ? const HomeScreen()
+                        : const AuthScreen())),
           );
         },
       ),

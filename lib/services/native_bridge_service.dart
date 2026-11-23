@@ -211,7 +211,11 @@ class NativeBridgeService {
   static Future<void> updateAutofillIndex(
     List<Map<String, String>> entries,
   ) async {
-    if (kIsWeb || !Platform.isAndroid) return;
+    if (kIsWeb) return;
+    if (!Platform.isAndroid &&
+        !Platform.environment.containsKey('FLUTTER_TEST')) {
+      return;
+    }
     try {
       await _channel.invokeMethod('updateAutofillIndex', {
         'entries': entries,
@@ -224,7 +228,11 @@ class NativeBridgeService {
   }
 
   static Future<void> clearAutofillIndex() async {
-    if (kIsWeb || !Platform.isAndroid) return;
+    if (kIsWeb) return;
+    if (!Platform.isAndroid &&
+        !Platform.environment.containsKey('FLUTTER_TEST')) {
+      return;
+    }
     try {
       await _channel.invokeMethod('clearAutofillIndex');
     } on MissingPluginException {
@@ -278,6 +286,29 @@ class NativeBridgeService {
       // Ignored when plugin channel is unavailable (e.g., tests).
     } catch (e) {
       debugPrint('openAutofillSettings error: $e');
+    }
+  }
+
+  static Future<bool> isAccessibilityServiceEnabled() async {
+    if (kIsWeb || !Platform.isAndroid) return false;
+    try {
+      final res = await _channel.invokeMethod<bool>('isAccessibilityServiceEnabled');
+      return res ?? false;
+    } on MissingPluginException {
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  static Future<void> openAccessibilitySettings() async {
+    if (kIsWeb || !Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('openAccessibilitySettings');
+    } on MissingPluginException {
+      // Ignored when plugin channel is unavailable (e.g., tests).
+    } catch (e) {
+      debugPrint('openAccessibilitySettings error: $e');
     }
   }
 

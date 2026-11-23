@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MultiPad</string>
+    <string name="accessibility_service_label">MultiPad Hızlı Doldurma &amp; Otomatik Giriş</string>
+    <string name="accessibility_service_description">MultiPad, bildirim çubuğu veya hızlı ayarlar üzerinden ekrandaki kullanıcı adı, şifre ve 2FA kodlarını otomatik algılayıp güvenle doldurmak için bu izni kullanır.</string>
+</resources>

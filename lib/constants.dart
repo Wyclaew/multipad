@@ -3,8 +3,8 @@
 import 'package:flutter/material.dart';
 
 class AppConstants {
-  static const String appVersion = '1.4.0';
-  static const int buildNumber = 4;
+  static const String appVersion = '1.4.1';
+  static const int buildNumber = 5;
 
   // Can be configured here or entered directly in the app's Setup / Settings screen.
   static const String defaultSupabaseUrl = '';

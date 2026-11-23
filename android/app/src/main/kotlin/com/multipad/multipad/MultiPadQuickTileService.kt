@@ -25,18 +25,33 @@ class MultiPadQuickTileService : TileService() {
         val tile = qsTile ?: return
         tile.label = "MultiPad"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            tile.subtitle = "Hızlı Arama"
+            tile.subtitle = if (MultiPadAccessibilityService.isRunning) "Hızlı Doldur" else "Hızlı Arama"
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            tile.stateDescription = "Hızlı Arama"
+            tile.stateDescription = "Hızlı Doldurma ve Kasa Arama"
         }
         tile.icon = Icon.createWithResource(this, R.drawable.ic_qs_tile)
-        tile.state = Tile.STATE_INACTIVE
+        tile.state = if (MultiPadAccessibilityService.isRunning) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
         tile.updateTile()
     }
 
     override fun onClick() {
         super.onClick()
+
+        // 1. If Accessibility Service is running, directly trigger on-screen autofill
+        if (MultiPadAccessibilityService.isRunning) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                // Collapse quick settings shade
+                try {
+                    val collapseIntent = Intent(Intent.ACTION_CLOSE_SYSTEM_DIALOGS)
+                    sendBroadcast(collapseIntent)
+                } catch (_) {}
+            }
+            MultiPadAccessibilityService.instance?.performQuickFill()
+            return
+        }
+
+        // 2. Fallback: Launch Quick Search activity
         val intent = Intent(this, MainActivity::class.java).apply {
             putExtra(MainActivity.EXTRA_MULTIPAD_ACTION, MainActivity.ACTION_QUICK_SEARCH)
             addFlags(

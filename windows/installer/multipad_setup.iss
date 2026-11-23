@@ -7,7 +7,7 @@
 
 #define MyAppName "MultiPad"
 #ifndef AppVersion
-  #define AppVersion "1.4.0"
+  #define AppVersion "1.4.1"
 #endif
 #define MyAppPublisher "Wyclaew"
 #define MyAppURL "https://github.com/Wyclaew/multipad"

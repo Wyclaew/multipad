@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MultiPad Password Manager",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Autofill credentials and 2FA tokens directly from your local MultiPad zero-knowledge vault.",
   "permissions": [
     "activeTab",

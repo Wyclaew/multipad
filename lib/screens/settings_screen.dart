@@ -14,6 +14,7 @@ import '../providers/settings_provider.dart';
 import '../providers/vault_provider.dart';
 import '../services/browser_bridge_service.dart';
 import '../services/clipboard_service.dart';
+import '../services/extension_installer_service.dart';
 import '../services/native_bridge_service.dart';
 import '../services/supabase_service.dart';
 import '../services/update_service.dart';
@@ -1376,6 +1377,56 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       );
                     },
                   ),
+                  ListTile(
+                    leading: const Icon(Icons.touch_app_outlined),
+                    title: Text(
+                      l10n.tr(
+                        'Hızlı Doldurma & Görev Çubuğu (Erişilebilirlik)',
+                        'Quick Fill & Notification Tile (Accessibility)',
+                      ),
+                    ),
+                    subtitle: Text(
+                      l10n.tr(
+                        'Bildirim çubuğundaki MultiPad butonu ile şifre ve 2FA kodunu otomatik doldurur',
+                        'Autofill credentials & 2FA directly via the Quick Settings notification tile',
+                      ),
+                    ),
+                    trailing: const Icon(Icons.arrow_forward_ios, size: 14),
+                    onTap: () {
+                      final auth = context.read<AuthProvider>();
+                      auth.runWithoutAutoLockUntilResumed(
+                        NativeBridgeService.openAccessibilitySettings,
+                      );
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.sync),
+                    title: Text(
+                      l10n.tr('Otomatik Doldurma Önbelleğini Eşitle', 'Sync Autofill Cache Now'),
+                    ),
+                    subtitle: Text(
+                      l10n.tr(
+                        'Kasadaki parolaları Android donanım anahtarlığına yazar',
+                        'Writes current vault passwords to Android Keystore cache',
+                      ),
+                    ),
+                    onTap: () async {
+                      await vault.syncAutofillIndex(true);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              l10n.tr(
+                                '✓ Otomatik doldurma donanım önbelleği güncellendi.',
+                                '✓ Autofill Keystore cache synchronized.',
+                              ),
+                            ),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      }
+                    },
+                  ),
                 ],
               ),
             ],
@@ -1865,6 +1916,123 @@ class _BrowserBridgeCardState extends State<_BrowserBridgeCard> {
                   ),
                 ],
               ),
+            ),
+            const SizedBox(height: 16),
+
+            // 1-Click Browser Extension Installation Actions
+            const SizedBox(height: 16),
+            Text(
+              l10n.tr('Tarayıcı Eklentisini Yükleme & Bağlama', 'Install & Connect Browser Extension'),
+              style: theme.textTheme.labelMedium?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton.tonalIcon(
+                  icon: const Icon(Icons.travel_explore, size: 18),
+                  label: Text(l10n.tr('Firefox\'a Yükle (about:debugging)', 'Install in Firefox')),
+                  onPressed: () async {
+                    await ExtensionInstallerService.launchFirefoxDebugging();
+                    if (!context.mounted) return;
+                    showDialog(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: Row(
+                          children: [
+                            const Icon(Icons.travel_explore, color: Color(0xFFFF7139)),
+                            const SizedBox(width: 8),
+                            Text(l10n.tr('Firefox Eklenti Yükleyici', 'Firefox Add-on Setup')),
+                          ],
+                        ),
+                        content: Text(
+                          l10n.tr(
+                            '1. Firefox "about:debugging" sayfası açıldı.\n'
+                            '2. Eklentinin manifest dosya yolu panonuza KOPYALANDI.\n'
+                            '3. Sayfadaki "Bu Firefox" (This Firefox) -> "Geçici Eklenti Yükle..." butonuna basıp panodan yapıştırın.\n\n'
+                            'Eklenti Mozilla mağazası gerektirmeden hemen aktifleşecek ve MultiPad ile yerel olarak bağlanacaktır.',
+                            '1. Firefox "about:debugging" tab has been opened.\n'
+                            '2. The extension manifest file path has been COPIED to your clipboard.\n'
+                            '3. Click "Load Temporary Add-on..." and paste the path.\n\n'
+                            'The extension runs without AMO store approval and connects locally.',
+                          ),
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.of(ctx).pop(),
+                            child: Text(l10n.tr('Anladım', 'Got it')),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.security_update_good, size: 18),
+                  label: Text(l10n.tr('Firefox Kalıcı Kurulum (Policy)', 'Firefox Permanent (Policy)')),
+                  onPressed: () async {
+                    final ok = await ExtensionInstallerService.installFirefoxPolicy();
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          ok
+                              ? l10n.tr(
+                                  '✓ Firefox dağıtım ilkesi kaydedildi. Firefox yeniden başlatıldığında eklenti kalıcı yüklenecektir.',
+                                  '✓ Firefox distribution policy saved. Restart Firefox to activate.',
+                                )
+                              : l10n.tr(
+                                  'İlke dosyası yazılamadı; lütfen "about:debugging" yöntemini kullanın.',
+                                  'Could not write policy file; please use about:debugging method.',
+                                ),
+                        ),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  },
+                ),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.extension_outlined, size: 18),
+                  label: Text(l10n.tr('Chrome / Edge\'e Yükle', 'Install in Chrome / Edge')),
+                  onPressed: () async {
+                    await ExtensionInstallerService.launchChromiumExtensions();
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          l10n.tr(
+                            'Chrome/Edge eklentiler sayfası açıldı ve eklenti klasör yolu panoya kopyalandı.',
+                            'Opened extensions page and copied extension directory path to clipboard.',
+                          ),
+                        ),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  },
+                ),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.content_copy, size: 18),
+                  label: Text(l10n.tr('Eklenti Yolunu Kopyala', 'Copy Extension Path')),
+                  onPressed: () async {
+                    await ExtensionInstallerService.copyPathToClipboard(isFirefox: true);
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          l10n.tr(
+                            '✓ Eklenti manifest dosya yolu panoya kopyalandı.',
+                            '✓ Extension manifest path copied to clipboard.',
+                          ),
+                        ),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  },
+                ),
+              ],
             ),
             const SizedBox(height: 16),
 
