@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -5,18 +6,19 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../constants.dart';
 import '../l10n/app_localizations.dart';
 import '../providers/auth_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/vault_provider.dart';
+import '../services/browser_bridge_service.dart';
 import '../services/clipboard_service.dart';
 import '../services/native_bridge_service.dart';
 import '../services/supabase_service.dart';
 import '../services/update_service.dart';
 import '../widgets/easter_egg_dialog.dart';
+import '../widgets/update_dialog.dart';
 import 'backup_screen.dart';
 import 'conflicts_screen.dart';
 import 'device_pairing_screen.dart';
@@ -921,171 +923,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
 
-    final asset = info.platformAsset;
-    double progress = 0;
-    String? statusMsg;
-    bool downloading = false;
-    String? err;
-
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: !downloading,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDlg) => AlertDialog(
-          title: Text(
-            l10n.tr(
-              'Yeni Sürüm Mevcut: ${info.latestVersion}',
-              'Update Available: ${info.latestVersion}',
-            ),
-          ),
-          content: SizedBox(
-            width: 440,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    l10n.tr(
-                      'Mevcut sürüm: ${info.currentVersion}',
-                      'Current version: ${info.currentVersion}',
-                    ),
-                    style: Theme.of(ctx).textTheme.bodySmall,
-                  ),
-                  if (asset != null) ...[
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Icon(
-                          asset.expectedSha256 != null
-                              ? Icons.verified_user
-                              : Icons.info_outline,
-                          size: 16,
-                          color: asset.expectedSha256 != null
-                              ? Colors.green
-                              : Colors.orangeAccent,
-                        ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            asset.expectedSha256 != null
-                                ? l10n.tr(
-                                    '${asset.name} • SHA-256 doğrulama mevcut',
-                                    '${asset.name} • SHA-256 verification available',
-                                  )
-                                : asset.name,
-                            style: const TextStyle(fontSize: 12),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                  if (info.releaseNotes.isNotEmpty) ...[
-                    const SizedBox(height: 10),
-                    Container(
-                      width: double.infinity,
-                      constraints: const BoxConstraints(maxHeight: 180),
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: SingleChildScrollView(
-                        child: Text(
-                          info.releaseNotes,
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                      ),
-                    ),
-                  ],
-                  if (downloading || statusMsg != null) ...[
-                    const SizedBox(height: 14),
-                    if (downloading)
-                      LinearProgressIndicator(value: progress > 0 ? progress : null),
-                    if (downloading) const SizedBox(height: 6),
-                    Text(
-                      statusMsg ?? '${(progress * 100).round()}%',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: !downloading && progress >= 1.0 ? Colors.green : null,
-                        fontWeight: !downloading && progress >= 1.0
-                            ? FontWeight.w600
-                            : FontWeight.normal,
-                      ),
-                    ),
-                  ],
-                  if (err != null) ...[
-                    const SizedBox(height: 10),
-                    Text(
-                      err!,
-                      style: const TextStyle(color: Colors.redAccent, fontSize: 12),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: downloading ? null : () => Navigator.of(ctx).pop(),
-              child: Text(l10n.close),
-            ),
-            TextButton(
-              onPressed: () async {
-                final uri = Uri.tryParse(info.htmlUrl);
-                if (uri != null) {
-                  final auth = context.read<AuthProvider>();
-                  await auth.runWithoutAutoLockUntilResumed(
-                    () => launchUrl(uri, mode: LaunchMode.externalApplication),
-                  );
-                }
-              },
-              child: Text(l10n.tr('GitHub Sayfası', 'GitHub Release')),
-            ),
-            if (asset != null)
-              FilledButton.icon(
-                onPressed: downloading
-                    ? null
-                    : () async {
-                        setDlg(() {
-                          downloading = true;
-                          progress = 0;
-                          err = null;
-                        });
-                        try {
-                          final auth = context.read<AuthProvider>();
-                          final resultMsg = await auth.runWithoutAutoLockUntilResumed(
-                            () => UpdateService.downloadAndInstall(
-                              asset,
-                              onProgress: (p) {
-                                if (ctx.mounted) setDlg(() => progress = p);
-                              },
-                              onStatus: (s) {
-                                if (ctx.mounted) setDlg(() => statusMsg = s);
-                              },
-                            ),
-                          );
-                          if (!ctx.mounted) return;
-                          setDlg(() {
-                            downloading = false;
-                            statusMsg = resultMsg;
-                            progress = 1.0;
-                          });
-                        } catch (e) {
-                          if (!ctx.mounted) return;
-                          setDlg(() {
-                            downloading = false;
-                            err = e.toString();
-                          });
-                        }
-                      },
-                icon: const Icon(Icons.system_update_alt),
-                label: Text(l10n.tr('İndir & Yükle', 'Download & Install')),
-              ),
-          ],
-        ),
-      ),
-    );
+    await UpdateDialog.show(context, info);
   }
 
   String _autoLockLabel(AppLocalizations l10n, int minutes) {
@@ -1145,535 +983,554 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.only(bottom: 32),
         children: [
-          _SectionHeader(l10n.secSecurity),
-
-          ListTile(
-            leading: const Icon(Icons.timer_outlined),
-            title: Text(l10n.tr('Otomatik Kilit Süresi', 'Auto-Lock Timeout')),
-            subtitle: Text(_autoLockLabel(l10n, settings.autoLockMinutes)),
-            onTap: () => _showChoiceDialog<int>(
-              title: l10n.tr('Hareketsizlik Sonrası Kilitle', 'Lock After Inactivity'),
-              currentValue: settings.autoLockMinutes,
-              options: [
-                (value: 1, label: l10n.tr('1 dakika', '1 minute'), subtitle: null),
-                (value: 5, label: l10n.tr('5 dakika', '5 minutes'), subtitle: null),
-                (value: 15, label: l10n.tr('15 dakika', '15 minutes'), subtitle: null),
-                (value: 0, label: l10n.tr('Kapalı', 'Off'), subtitle: null),
-              ],
-              onSelected: settings.setAutoLockMinutes,
-            ),
-          ),
-
-          SwitchListTile(
-            secondary: const Icon(Icons.visibility_off_outlined),
-            title: Text(
-              isMacOS
-                  ? l10n.tr(
-                      'Pencere Küçültüldüğünde / Gizlendiğinde Kilitle',
-                      'Lock when Window Minimized or Hidden',
-                    )
-                  : l10n.tr('Arka Plana Alınca Kilitle', 'Lock on Background'),
-            ),
-            subtitle: Text(
-              isMacOS
-                  ? l10n.tr(
-                      'Pencere simge durumuna küçültüldüğünde veya gizlendiğinde kasayı anında kilitle',
-                      'Immediately lock the vault when minimized or moved to background',
-                    )
-                  : l10n.tr(
-                      'Uygulama simge durumuna küçültülünce kasayı kilitle',
-                      'Lock vault when app leaves foreground',
-                    ),
-            ),
-            value: settings.lockOnBackground,
-            onChanged: settings.setLockOnBackground,
-          ),
-
-          if (isAndroid)
-            SwitchListTile(
-              secondary: const Icon(Icons.screenshot_monitor_outlined),
-              title: Text(
-                l10n.tr('Ekran Görüntüsü Koruması (FLAG_SECURE)', 'Screen Capture Protection (FLAG_SECURE)'),
-              ),
-              subtitle: Text(
-                l10n.tr(
-                  'Son uygulamalar önizlemesini ve ekran görüntüsünü engeller',
-                  'Blocks screenshots and Android Recents preview',
-                ),
-              ),
-              value: settings.flagSecureEnabled,
-              onChanged: settings.setFlagSecureEnabled,
-            ),
-
-          ListTile(
-            leading: const Icon(Icons.content_paste_off_outlined),
-            title: Text(l10n.tr('Pano Otomatik Temizleme', 'Clipboard Auto-Clear')),
-            subtitle: Text(_clipboardLabel(l10n, settings.clipboardTimeoutSeconds)),
-            onTap: () => _showChoiceDialog<int>(
-              title: l10n.tr('Pano Temizleme Süresi', 'Clipboard Clear Timeout'),
-              currentValue: settings.clipboardTimeoutSeconds,
-              options: [
-                (value: 10, label: l10n.tr('10 saniye', '10 seconds'), subtitle: null),
-                (value: 30, label: l10n.tr('30 saniye', '30 seconds'), subtitle: null),
-                (value: 60, label: l10n.tr('1 dakika', '1 minute'), subtitle: null),
-                (value: 0, label: l10n.tr('Kapalı', 'Off'), subtitle: null),
-              ],
-              onSelected: settings.setClipboardTimeoutSeconds,
-            ),
-          ),
-
-          if (auth.canUseBiometrics)
-            SwitchListTile(
-              secondary: const Icon(Icons.fingerprint),
-              title: Text(l10n.tr('Biyometrik Kilit Açma', 'Biometric Unlock')),
-              subtitle: auth.isBiometricTemporarilyDisabled
-                  ? Text(
-                      l10n.tr(
-                        'Üst üste hatalı deneme nedeniyle geçici devre dışı',
-                        'Temporarily disabled due to failed attempts',
-                      ),
-                      style: const TextStyle(color: Colors.orangeAccent),
-                    )
-                  : null,
-              value: auth.isBiometricEnabled,
-              onChanged: (v) async {
-                final messenger = ScaffoldMessenger.of(context);
-                final ok = await auth.toggleBiometrics(v);
-                if (!ok && mounted && auth.errorMessage != null) {
-                  messenger.showSnackBar(
-                    SnackBar(content: Text(auth.errorMessage!)),
-                  );
-                }
-              },
-            ),
-
-          ListTile(
-            leading: const Icon(Icons.pin_outlined),
-            title: Text(l10n.quickPin),
-            subtitle: Text(
-              auth.isQuickPinEnabled
-                  ? l10n.tr('Aktif (Değiştirmek için dokunun)', 'Enabled (Tap to manage)')
-                  : l10n.tr('Hızlı kilitleme için ikincil PIN ayarlayın', 'Set secondary PIN for fast unlock'),
-            ),
-            onTap: () => _openQuickPinDialog(auth),
-          ),
-
-          if (!auth.isDuressMode) ...[
-            ListTile(
-              leading: const Icon(Icons.enhanced_encryption_outlined),
-              title: Text(l10n.tr('Anahtar Türetme (KDF)', 'Key Derivation (KDF)')),
-              subtitle: Text(
-                auth.isArgon2idActive
-                    ? 'Argon2id (Bellek-sert / Aktif)'
-                    : 'PBKDF2-HMAC-SHA256 (Argon2id yükseltmesi mevcut)',
-              ),
-              trailing: auth.isArgon2idActive
-                  ? const Icon(Icons.verified, color: Colors.green)
-                  : TextButton(
-                      onPressed: () => _openUpgradeArgon2idDialog(auth, vault),
-                      child: Text(l10n.tr("Argon2id'ye Geç", 'Upgrade')),
-                    ),
-              onTap: auth.isArgon2idActive
-                  ? null
-                  : () => _openUpgradeArgon2idDialog(auth, vault),
-            ),
-
-            ListTile(
-              leading: const Icon(Icons.password_outlined),
-              title: Text(l10n.tr('Ana Parolayı Değiştir', 'Change Master Password')),
-              subtitle: Text(
-                l10n.tr(
-                  'Tüm kasayı yeni anahtarla yeniden şifreler',
-                  'Re-encrypts entire vault with a new key',
-                ),
-              ),
-              onTap: () => _openChangeMasterPasswordDialog(auth, vault),
-            ),
-
-            ListTile(
-              leading: const Icon(Icons.warning_amber_rounded),
-              title: Text(
-                l10n.tr('Sahte / Panik Parolası (Duress)', 'Duress / Panic Password'),
-              ),
-              subtitle: Text(
-                auth.isDuressEnabled
-                    ? l10n.tr('Aktif (Panik kasası hazır)', 'Enabled (Decoy vault ready)')
-                    : l10n.tr('Acil durumlar için ikinci zararsız kasa şifresi', 'Secondary password for decoy vault'),
-              ),
-              onTap: () => _openDuressDialog(auth),
-            ),
-          ],
-
-          ListTile(
-            leading: const Icon(Icons.av_timer_outlined),
-            title: Text(l10n.tr('2FA Yeniden İsteme Sıklığı', '2FA Re-Prompt Interval')),
-            subtitle: Text(
-              l10n.tr(
-                '${settings.twoFactorRepromptDays} gün',
-                '${settings.twoFactorRepromptDays} days',
-              ),
-            ),
-            onTap: () => _showChoiceDialog<int>(
-              title: l10n.tr('2FA Sıklığı Seçin', 'Select 2FA Interval'),
-              currentValue: settings.twoFactorRepromptDays,
-              options: [
-                (value: 30, label: l10n.tr('30 gün', '30 days'), subtitle: null),
-                (value: 60, label: l10n.tr('60 gün', '60 days'), subtitle: null),
-                (value: 90, label: l10n.tr('90 gün', '90 days'), subtitle: null),
-              ],
-              onSelected: settings.setTwoFactorRepromptDays,
-            ),
-          ),
-
-          if (isCloudConnected) ...[
-            ListTile(
-              leading: const Icon(Icons.verified_user_outlined),
-              title: Text(l10n.tr('Hesap Seviyesi 2FA (TOTP)', 'Account-Level 2FA (TOTP)')),
-              subtitle: _loadingMfa
-                  ? Text(l10n.tr('Kontrol ediliyor...', 'Checking...'))
-                  : Text(
-                      verifiedMfaCount > 0
-                          ? l10n.tr('Etkin ($verifiedMfaCount doğrulayıcı)', 'Enabled ($verifiedMfaCount factor)')
-                          : l10n.tr('Kapalı — giriş için önerilir', 'Disabled — recommended'),
-                    ),
-              trailing: Icon(
-                verifiedMfaCount > 0 ? Icons.check_circle : Icons.chevron_right,
-                color: verifiedMfaCount > 0 ? Colors.green : null,
-              ),
-              onTap: () => _openMfaDialog(auth),
-            ),
-            ListTile(
-              leading: const Icon(Icons.devices_other_outlined),
-              title: Text(
-                l10n.tr('Diğer Tüm Cihazlardan Çıkış Yap', 'Sign Out All Other Devices'),
-              ),
-              subtitle: Text(
-                l10n.tr(
-                  'Bu cihaz hariç aktif Supabase oturumlarını iptal eder',
-                  'Revokes all other cloud sessions except this device',
-                ),
-              ),
-              onTap: () async {
-                final messenger = ScaffoldMessenger.of(context);
-                final ok = await auth.signOutOtherDevices();
-                if (!mounted) return;
-                messenger.showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      ok
-                          ? l10n.tr('Diğer cihaz oturumları kapatıldı.', 'Signed out other devices.')
-                          : (auth.errorMessage ?? 'Error'),
-                    ),
-                  ),
-                );
-              },
-            ),
-          ],
-
-          ListTile(
-            leading: const Icon(Icons.update_disabled_outlined),
-            title: Text(l10n.tr('Parola Eskime Uyarısı', 'Password Age Warning')),
-            subtitle: Text(
-              settings.globalExpiryDays <= 0
-                  ? l10n.tr('Kapalı', 'Off')
-                  : l10n.tr('${settings.globalExpiryDays} gün', '${settings.globalExpiryDays} days'),
-            ),
-            onTap: () => _showChoiceDialog<int>(
-              title: l10n.tr('Parola Yenileme Hatırlatma Süresi', 'Password Expiry Warning'),
-              currentValue: settings.globalExpiryDays,
-              options: [
-                (value: 90, label: l10n.tr('90 gün', '90 days'), subtitle: null),
-                (value: 180, label: l10n.tr('180 gün', '180 days'), subtitle: null),
-                (value: 365, label: l10n.tr('365 gün', '365 days'), subtitle: null),
-                (value: 0, label: l10n.tr('Kapalı', 'Off'), subtitle: null),
-              ],
-              onSelected: (days) async {
-                await settings.setGlobalExpiryDays(days);
-                await auth.setGlobalPasswordExpiryDays(days);
-              },
-            ),
-          ),
-
-          ListTile(
-            leading: const Icon(Icons.history_edu_outlined),
-            title: Text(l10n.securityLogs),
-            subtitle: Text(
-              l10n.tr(
-                'Başarısız giriş ve güvenlik olaylarının şifreli kaydı',
-                'Encrypted log of failed attempts & security events',
-              ),
-            ),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const SecurityLogsScreen()),
-            ),
-          ),
-
-          const Divider(),
-          _SectionHeader(l10n.secAppearance),
-
-          ListTile(
-            leading: const Icon(Icons.palette_outlined),
-            title: Text(l10n.tr('Tema Modu', 'Theme Mode')),
-            subtitle: Text(_themeLabel(l10n, settings.themePreference)),
-            onTap: () => _showChoiceDialog<AppThemePreference>(
-              title: l10n.tr('Tema Seçin', 'Select Theme'),
-              currentValue: settings.themePreference,
-              options: [
-                (value: AppThemePreference.system, label: l10n.tr('Sistem Varsayılanı', 'System Default'), subtitle: null),
-                (value: AppThemePreference.light, label: l10n.tr('Açık Tema', 'Light'), subtitle: null),
-                (value: AppThemePreference.dark, label: l10n.tr('Koyu Tema', 'Dark'), subtitle: null),
-                (value: AppThemePreference.amoled, label: l10n.tr('AMOLED Saf Siyah', 'AMOLED Pure Black'), subtitle: l10n.tr('OLED ekranlar için #000000 arka plan', 'Pure #000000 background for OLED')),
-              ],
-              onSelected: settings.setThemePreference,
-            ),
-          ),
-
-          ListTile(
-            leading: const Icon(Icons.format_size_outlined),
-            title: Text(l10n.tr('Yazı Boyutu', 'Font Size')),
-            subtitle: Slider(
-              value: settings.fontScale,
-              min: 0.85,
-              max: 1.30,
-              divisions: 9,
-              label: '${(settings.fontScale * 100).round()}%',
-              onChanged: (v) => settings.setFontScale(v),
-            ),
-            trailing: Text('${(settings.fontScale * 100).round()}%'),
-          ),
-
-          ListTile(
-            leading: const Icon(Icons.language_outlined),
-            title: Text(l10n.tr('Uygulama Dili', 'App Language')),
-            subtitle: Text(_localeLabel(l10n, settings.localeCode)),
-            onTap: () => _showChoiceDialog<String>(
-              title: l10n.tr('Dil Seçin', 'Select Language'),
-              currentValue: settings.localeCode,
-              options: [
-                (value: 'system', label: l10n.tr('Sistem Dili', 'System Language'), subtitle: null),
-                (value: 'tr', label: 'Türkçe', subtitle: null),
-                (value: 'en', label: 'English', subtitle: null),
-              ],
-              onSelected: settings.setLocaleCode,
-            ),
-          ),
-
-          if (isDesktop || isAndroid) ...[
-            const Divider(),
-            _SectionHeader(l10n.secPlatform),
-          ],
-
-          if (isDesktop) ...[
-            SwitchListTile(
-              secondary: const Icon(Icons.dock_outlined),
-              title: Text(
-                Platform.isMacOS
-                    ? l10n.tr('Menü Çubuğunda Çalıştır', 'Keep in Menu Bar')
-                    : l10n.tr('Sistem Tepsisinde Çalıştır', 'Minimize to System Tray'),
-              ),
-              subtitle: Text(
-                l10n.tr(
-                  'Pencere kapatıldığında arka planda açık kalır',
-                  'Keeps app running in tray when window is closed',
-                ),
-              ),
-              value: settings.trayEnabled,
-              onChanged: settings.setTrayEnabled,
-            ),
-            SwitchListTile(
-              secondary: const Icon(Icons.keyboard_command_key_rounded),
-              title: Text(
-                l10n.tr('Global Hızlı Arama Kısayolu', 'Global Quick Search Hotkey'),
-              ),
-              subtitle: Text(
-                Platform.isMacOS ? 'Cmd + Shift + Space' : 'Ctrl + Shift + Space',
-              ),
-              value: settings.globalHotkeyEnabled,
-              onChanged: settings.setGlobalHotkeyEnabled,
-            ),
-          ],
-
-          if (isAndroid) ...[
-            SwitchListTile(
-              secondary: const Icon(Icons.auto_fix_high_outlined),
-              title: Text(l10n.tr('Android Otomatik Doldurma İndeksi', 'Android Autofill Service Index')),
-              subtitle: Text(
-                l10n.tr(
-                  'Chrome ve diğer uygulamalarda parola/TOTP önerisi için şifreli önbellek tutar',
-                  'Keeps Keystore-encrypted cache for Chrome & app autofill',
-                ),
-              ),
-              value: settings.autofillEnabled,
-              onChanged: (v) async {
-                await settings.setAutofillEnabled(v);
-                await vault.syncAutofillIndex(v);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.open_in_new),
-              title: Text(
-                l10n.tr('Android Otomatik Doldurma Servisini Seç', 'Open Android Autofill Settings'),
-              ),
-              subtitle: Text(
-                l10n.tr(
-                  'Sistem ayarlarında MultiPad\'i varsayılan sağlayıcı yapın',
-                  'Set MultiPad as your system autofill service',
-                ),
-              ),
-              onTap: () {
-                final auth = context.read<AuthProvider>();
-                auth.runWithoutAutoLockUntilResumed(
-                  NativeBridgeService.openAndroidAutofillSettings,
-                );
-              },
-            ),
-          ],
-
-          const Divider(),
-          _SectionHeader(l10n.secData),
-
-          if (vault.hasConflicts)
-            ListTile(
-              leading: const Icon(Icons.merge_type, color: Colors.orangeAccent),
-              title: Text('${l10n.conflictsTitle} (${vault.conflicts.length})'),
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const ConflictsScreen()),
-              ),
-            ),
-
-          ListTile(
-            leading: const Icon(Icons.file_upload_outlined),
-            title: Text(l10n.importPasswords),
-            subtitle: Text(
-              l10n.tr(
-                'Chrome, Edge, Bitwarden veya KeePass içe aktarımı',
-                'Import from Chrome, Edge, Bitwarden or KeePass',
-              ),
-            ),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const ImportScreen()),
-            ),
-          ),
-
-          ListTile(
-            leading: const Icon(Icons.backup_outlined),
-            title: Text(l10n.backup),
-            subtitle: Text(
-              l10n.tr(
-                'Argon2id + AES-GCM şifreli taşınabilir yedek dosyası',
-                'Argon2id + AES-GCM encrypted portable backup',
-              ),
-            ),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const BackupScreen()),
-            ),
-          ),
-
-          ListTile(
-            leading: const Icon(Icons.devices_outlined),
-            title: Text(l10n.devicePairing),
-            subtitle: Text(
-              l10n.tr(
-                'Aynı ağda veya aktarım koduyla başka cihaza kurulum gönder',
-                'Transfer vault credentials to another device via LAN or code',
-              ),
-            ),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) =>
-                    const DevicePairingScreen(initialRole: PairingRole.send),
-              ),
-            ),
-          ),
-
-          if (!auth.isDuressMode)
-            ListTile(
-              leading: Icon(
-                isCloudConnected ? Icons.cloud_done_outlined : Icons.cloud_off_outlined,
-                color: isCloudConnected ? Colors.green : null,
-              ),
-              title: Text(l10n.tr('Bulut Senkronizasyonu (Supabase)', 'Cloud Sync (Supabase)')),
-              subtitle: Text(
-                isCloudConnected
-                    ? (auth.currentUserEmail ?? SupabaseService.currentUser?.email ?? 'Connected')
-                    : l10n.tr('Bağlı değil — bağlamak için dokunun', 'Not connected — tap to connect'),
-              ),
-              onTap: () => isCloudConnected
-                  ? vault.loadVault()
-                  : _openCloudConnectDialog(auth, vault),
-            ),
-
-          ListTile(
-            leading: _checkingUpdate
-                ? const SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.system_update_outlined),
-            title: Text(l10n.tr('Güncellemeleri Denetle', 'Check for Updates')),
-            subtitle: Text('MultiPad v${AppConstants.appVersion}'),
-            onTap: _checkingUpdate ? null : _checkForUpdates,
-          ),
-
-          ListTile(
-            leading: const Icon(Icons.info_outline),
-            title: Text(l10n.tr('Sürüm Bilgisi', 'Version')),
-            subtitle: Text(
-              'v${AppConstants.appVersion} (Build ${AppConstants.buildNumber})',
-            ),
-            onTap: _handleVersionTap,
-          ),
-
-          const Divider(),
-
-          ListTile(
-            leading: const Icon(Icons.lock_outline),
-            title: Text(l10n.lockVault),
-            onTap: () {
-              Navigator.of(context).popUntil((r) => r.isFirst);
-              auth.lockVault(reason: 'settings_lock');
-            },
-          ),
-
-          ListTile(
-            leading: const Icon(Icons.logout, color: Colors.redAccent),
-            title: Text(
-              l10n.logout,
-              style: const TextStyle(color: Colors.redAccent),
-            ),
-            onTap: () async {
-              final navigator = Navigator.of(context);
-              final ok = await showDialog<bool>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  title: Text(l10n.logout),
-                  content: Text(
-                    l10n.tr(
-                      'Bu cihazdaki oturum kapatılacak ve önbellek temizlenecek. Devam edilsin mi?',
-                      'Sign out and clear active session on this device?',
-                    ),
-                  ),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.of(ctx).pop(false),
-                      child: Text(l10n.cancel),
-                    ),
-                    FilledButton(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Colors.redAccent,
-                      ),
-                      onPressed: () => Navigator.of(ctx).pop(true),
-                      child: Text(l10n.logout),
-                    ),
+          _SectionHeader(l10n.secSecurity, icon: Icons.security_rounded),
+          _SettingsCard(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.timer_outlined),
+                title: Text(l10n.tr('Otomatik Kilit Süresi', 'Auto-Lock Timeout')),
+                subtitle: Text(_autoLockLabel(l10n, settings.autoLockMinutes)),
+                onTap: () => _showChoiceDialog<int>(
+                  title: l10n.tr('Hareketsizlik Sonrası Kilitle', 'Lock After Inactivity'),
+                  currentValue: settings.autoLockMinutes,
+                  options: [
+                    (value: 1, label: l10n.tr('1 dakika', '1 minute'), subtitle: null),
+                    (value: 5, label: l10n.tr('5 dakika', '5 minutes'), subtitle: null),
+                    (value: 15, label: l10n.tr('15 dakika', '15 minutes'), subtitle: null),
+                    (value: 0, label: l10n.tr('Kapalı', 'Off'), subtitle: null),
                   ],
+                  onSelected: settings.setAutoLockMinutes,
                 ),
-              );
-              if (ok == true && mounted) {
-                navigator.popUntil((r) => r.isFirst);
-                await auth.logout();
-              }
-            },
+              ),
+
+              SwitchListTile(
+                secondary: const Icon(Icons.visibility_off_outlined),
+                title: Text(
+                  isMacOS
+                      ? l10n.tr(
+                          'Pencere Küçültüldüğünde / Gizlendiğinde Kilitle',
+                          'Lock when Window Minimized or Hidden',
+                        )
+                      : l10n.tr('Arka Plana Alınca Kilitle', 'Lock on Background'),
+                ),
+                subtitle: Text(
+                  isMacOS
+                      ? l10n.tr(
+                          'Pencere simge durumuna küçültüldüğünde veya gizlendiğinde kasayı anında kilitle',
+                          'Immediately lock the vault when minimized or moved to background',
+                        )
+                      : l10n.tr(
+                          'Uygulama simge durumuna küçültülünce kasayı kilitle',
+                          'Lock vault when app leaves foreground',
+                        ),
+                ),
+                value: settings.lockOnBackground,
+                onChanged: settings.setLockOnBackground,
+              ),
+
+              if (isAndroid)
+                SwitchListTile(
+                  secondary: const Icon(Icons.screenshot_monitor_outlined),
+                  title: Text(
+                    l10n.tr('Ekran Görüntüsü Koruması (FLAG_SECURE)', 'Screen Capture Protection (FLAG_SECURE)'),
+                  ),
+                  subtitle: Text(
+                    l10n.tr(
+                      'Son uygulamalar önizlemesini ve ekran görüntüsünü engeller',
+                      'Blocks screenshots and Android Recents preview',
+                    ),
+                  ),
+                  value: settings.flagSecureEnabled,
+                  onChanged: settings.setFlagSecureEnabled,
+                ),
+
+              ListTile(
+                leading: const Icon(Icons.content_paste_off_outlined),
+                title: Text(l10n.tr('Pano Otomatik Temizleme', 'Clipboard Auto-Clear')),
+                subtitle: Text(_clipboardLabel(l10n, settings.clipboardTimeoutSeconds)),
+                onTap: () => _showChoiceDialog<int>(
+                  title: l10n.tr('Pano Temizleme Süresi', 'Clipboard Clear Timeout'),
+                  currentValue: settings.clipboardTimeoutSeconds,
+                  options: [
+                    (value: 10, label: l10n.tr('10 saniye', '10 seconds'), subtitle: null),
+                    (value: 30, label: l10n.tr('30 saniye', '30 seconds'), subtitle: null),
+                    (value: 60, label: l10n.tr('1 dakika', '1 minute'), subtitle: null),
+                    (value: 0, label: l10n.tr('Kapalı', 'Off'), subtitle: null),
+                  ],
+                  onSelected: settings.setClipboardTimeoutSeconds,
+                ),
+              ),
+
+              if (auth.canUseBiometrics)
+                SwitchListTile(
+                  secondary: const Icon(Icons.fingerprint),
+                  title: Text(l10n.tr('Biyometrik Kilit Açma', 'Biometric Unlock')),
+                  subtitle: auth.isBiometricTemporarilyDisabled
+                      ? Text(
+                          l10n.tr(
+                            'Üst üste hatalı deneme nedeniyle geçici devre dışı',
+                            'Temporarily disabled due to failed attempts',
+                          ),
+                          style: const TextStyle(color: Colors.orangeAccent),
+                        )
+                      : null,
+                  value: auth.isBiometricEnabled,
+                  onChanged: (v) async {
+                    final messenger = ScaffoldMessenger.of(context);
+                    final ok = await auth.toggleBiometrics(v);
+                    if (!ok && mounted && auth.errorMessage != null) {
+                      messenger.showSnackBar(
+                        SnackBar(content: Text(auth.errorMessage!)),
+                      );
+                    }
+                  },
+                ),
+
+              ListTile(
+                leading: const Icon(Icons.pin_outlined),
+                title: Text(l10n.quickPin),
+                subtitle: Text(
+                  auth.isQuickPinEnabled
+                      ? l10n.tr('Aktif (Değiştirmek için dokunun)', 'Enabled (Tap to manage)')
+                      : l10n.tr('Hızlı kilitleme için ikincil PIN ayarlayın', 'Set secondary PIN for fast unlock'),
+                ),
+                onTap: () => _openQuickPinDialog(auth),
+              ),
+
+              if (!auth.isDuressMode) ...[
+                ListTile(
+                  leading: const Icon(Icons.enhanced_encryption_outlined),
+                  title: Text(l10n.tr('Anahtar Türetme (KDF)', 'Key Derivation (KDF)')),
+                  subtitle: Text(
+                    auth.isArgon2idActive
+                        ? 'Argon2id (Bellek-sert / Aktif)'
+                        : 'PBKDF2-HMAC-SHA256 (Argon2id yükseltmesi mevcut)',
+                  ),
+                  trailing: auth.isArgon2idActive
+                      ? const Icon(Icons.verified, color: Colors.green)
+                      : const Icon(Icons.chevron_right),
+                  onTap: auth.isArgon2idActive
+                      ? null
+                      : () => _openUpgradeArgon2idDialog(auth, vault),
+                ),
+
+                ListTile(
+                  leading: const Icon(Icons.password_outlined),
+                  title: Text(l10n.tr('Ana Parolayı Değiştir', 'Change Master Password')),
+                  subtitle: Text(
+                    l10n.tr(
+                      'Tüm kasayı yeni anahtarla yeniden şifreler',
+                      'Re-encrypts entire vault with a new key',
+                    ),
+                  ),
+                  onTap: () => _openChangeMasterPasswordDialog(auth, vault),
+                ),
+
+                ListTile(
+                  leading: const Icon(Icons.warning_amber_rounded),
+                  title: Text(
+                    l10n.tr('Sahte / Panik Parolası (Duress)', 'Duress / Panic Password'),
+                  ),
+                  subtitle: Text(
+                    auth.isDuressEnabled
+                        ? l10n.tr('Aktif (Panik kasası hazır)', 'Enabled (Decoy vault ready)')
+                        : l10n.tr('Acil durumlar için ikinci zararsız kasa şifresi', 'Secondary password for decoy vault'),
+                  ),
+                  onTap: () => _openDuressDialog(auth),
+                ),
+              ],
+
+              ListTile(
+                leading: const Icon(Icons.av_timer_outlined),
+                title: Text(l10n.tr('2FA Yeniden İsteme Sıklığı', '2FA Re-Prompt Interval')),
+                subtitle: Text(
+                  l10n.tr(
+                    '${settings.twoFactorRepromptDays} gün',
+                    '${settings.twoFactorRepromptDays} days',
+                  ),
+                ),
+                onTap: () => _showChoiceDialog<int>(
+                  title: l10n.tr('2FA Sıklığı Seçin', 'Select 2FA Interval'),
+                  currentValue: settings.twoFactorRepromptDays,
+                  options: [
+                    (value: 30, label: l10n.tr('30 gün', '30 days'), subtitle: null),
+                    (value: 60, label: l10n.tr('60 gün', '60 days'), subtitle: null),
+                    (value: 90, label: l10n.tr('90 gün', '90 days'), subtitle: null),
+                  ],
+                  onSelected: settings.setTwoFactorRepromptDays,
+                ),
+              ),
+
+              if (isCloudConnected) ...[
+                ListTile(
+                  leading: const Icon(Icons.verified_user_outlined),
+                  title: Text(l10n.tr('Hesap Seviyesi 2FA (TOTP)', 'Account-Level 2FA (TOTP)')),
+                  subtitle: _loadingMfa
+                      ? Text(l10n.tr('Kontrol ediliyor...', 'Checking...'))
+                      : Text(
+                          verifiedMfaCount > 0
+                              ? l10n.tr('Etkin ($verifiedMfaCount doğrulayıcı)', 'Enabled ($verifiedMfaCount factor)')
+                              : l10n.tr('Kapalı — giriş için önerilir', 'Disabled — recommended'),
+                        ),
+                  trailing: Icon(
+                    verifiedMfaCount > 0 ? Icons.check_circle : Icons.chevron_right,
+                    color: verifiedMfaCount > 0 ? Colors.green : null,
+                  ),
+                  onTap: () => _openMfaDialog(auth),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.devices_other_outlined),
+                  title: Text(
+                    l10n.tr('Diğer Tüm Cihazlardan Çıkış Yap', 'Sign Out All Other Devices'),
+                  ),
+                  subtitle: Text(
+                    l10n.tr(
+                      'Bu cihaz hariç aktif Supabase oturumlarını iptal eder',
+                      'Revokes all other cloud sessions except this device',
+                    ),
+                  ),
+                  onTap: () async {
+                    final messenger = ScaffoldMessenger.of(context);
+                    final ok = await auth.signOutOtherDevices();
+                    if (!mounted) return;
+                    messenger.showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          ok
+                              ? l10n.tr('Diğer cihaz oturumları kapatıldı.', 'Signed out other devices.')
+                              : (auth.errorMessage ?? 'Error'),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
+
+              ListTile(
+                leading: const Icon(Icons.update_disabled_outlined),
+                title: Text(l10n.tr('Parola Eskime Uyarısı', 'Password Age Warning')),
+                subtitle: Text(
+                  settings.globalExpiryDays <= 0
+                      ? l10n.tr('Kapalı', 'Off')
+                      : l10n.tr('${settings.globalExpiryDays} gün', '${settings.globalExpiryDays} days'),
+                ),
+                onTap: () => _showChoiceDialog<int>(
+                  title: l10n.tr('Parola Yenileme Hatırlatma Süresi', 'Password Expiry Warning'),
+                  currentValue: settings.globalExpiryDays,
+                  options: [
+                    (value: 90, label: l10n.tr('90 gün', '90 days'), subtitle: null),
+                    (value: 180, label: l10n.tr('180 gün', '180 days'), subtitle: null),
+                    (value: 365, label: l10n.tr('365 gün', '365 days'), subtitle: null),
+                    (value: 0, label: l10n.tr('Kapalı', 'Off'), subtitle: null),
+                  ],
+                  onSelected: (days) async {
+                    await settings.setGlobalExpiryDays(days);
+                    await auth.setGlobalPasswordExpiryDays(days);
+                  },
+                ),
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.history_edu_outlined),
+                title: Text(l10n.securityLogs),
+                subtitle: Text(
+                  l10n.tr(
+                    'Başarısız giriş ve güvenlik olaylarının şifreli kaydı',
+                    'Encrypted log of failed attempts & security events',
+                  ),
+                ),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const SecurityLogsScreen()),
+                ),
+              ),
+            ],
+          ),
+
+          _SectionHeader(l10n.secAppearance, icon: Icons.palette_outlined),
+          _SettingsCard(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.palette_outlined),
+                title: Text(l10n.tr('Tema Modu', 'Theme Mode')),
+                subtitle: Text(_themeLabel(l10n, settings.themePreference)),
+                onTap: () => _showChoiceDialog<AppThemePreference>(
+                  title: l10n.tr('Tema Seçin', 'Select Theme'),
+                  currentValue: settings.themePreference,
+                  options: [
+                    (value: AppThemePreference.system, label: l10n.tr('Sistem Varsayılanı', 'System Default'), subtitle: null),
+                    (value: AppThemePreference.light, label: l10n.tr('Açık Tema', 'Light'), subtitle: null),
+                    (value: AppThemePreference.dark, label: l10n.tr('Koyu Tema', 'Dark'), subtitle: null),
+                    (value: AppThemePreference.amoled, label: l10n.tr('AMOLED Saf Siyah', 'AMOLED Pure Black'), subtitle: l10n.tr('OLED ekranlar için #000000 arka plan', 'Pure #000000 background for OLED')),
+                  ],
+                  onSelected: settings.setThemePreference,
+                ),
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.format_size_outlined),
+                title: Text(l10n.tr('Yazı Boyutu', 'Font Size')),
+                subtitle: Slider(
+                  value: settings.fontScale,
+                  min: 0.85,
+                  max: 1.30,
+                  divisions: 9,
+                  label: '${(settings.fontScale * 100).round()}%',
+                  onChanged: (v) => settings.setFontScale(v),
+                ),
+                trailing: Text('${(settings.fontScale * 100).round()}%'),
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.language_outlined),
+                title: Text(l10n.tr('Uygulama Dili', 'App Language')),
+                subtitle: Text(_localeLabel(l10n, settings.localeCode)),
+                onTap: () => _showChoiceDialog<String>(
+                  title: l10n.tr('Dil Seçin', 'Select Language'),
+                  currentValue: settings.localeCode,
+                  options: [
+                    (value: 'system', label: l10n.tr('Sistem Dili', 'System Language'), subtitle: null),
+                    (value: 'tr', label: 'Türkçe', subtitle: null),
+                    (value: 'en', label: 'English', subtitle: null),
+                  ],
+                  onSelected: settings.setLocaleCode,
+                ),
+              ),
+            ],
+          ),
+
+          if (isDesktop || isAndroid || BrowserBridgeService.instance != null) ...[
+            _SectionHeader(
+              l10n.tr('Eklentiler ve Entegrasyonlar', 'Extensions & Integrations'),
+              icon: Icons.extension_outlined,
+            ),
+            if (isDesktop || BrowserBridgeService.instance != null)
+              const _BrowserBridgeCard(),
+            if (isDesktop) ...[
+              const SizedBox(height: 8),
+              _SettingsCard(
+                children: [
+                  SwitchListTile(
+                    secondary: const Icon(Icons.dock_outlined),
+                    title: Text(
+                      Platform.isMacOS
+                          ? l10n.tr('Menü Çubuğunda Çalıştır', 'Keep in Menu Bar')
+                          : l10n.tr('Sistem Tepsisinde Çalıştır', 'Minimize to System Tray'),
+                    ),
+                    subtitle: Text(
+                      l10n.tr(
+                        'Pencere kapatıldığında arka planda açık kalır',
+                        'Keeps app running in tray when window is closed',
+                      ),
+                    ),
+                    value: settings.trayEnabled,
+                    onChanged: settings.setTrayEnabled,
+                  ),
+                  SwitchListTile(
+                    secondary: const Icon(Icons.keyboard_command_key_rounded),
+                    title: Text(
+                      l10n.tr('Global Hızlı Arama Kısayolu', 'Global Quick Search Hotkey'),
+                    ),
+                    subtitle: Text(
+                      Platform.isMacOS ? 'Cmd + Shift + Space' : 'Ctrl + Shift + Space',
+                    ),
+                    value: settings.globalHotkeyEnabled,
+                    onChanged: settings.setGlobalHotkeyEnabled,
+                  ),
+                ],
+              ),
+            ],
+            if (isAndroid) ...[
+              const SizedBox(height: 8),
+              _SettingsCard(
+                children: [
+                  SwitchListTile(
+                    secondary: const Icon(Icons.auto_fix_high_outlined),
+                    title: Text(l10n.tr('Android Otomatik Doldurma İndeksi', 'Android Autofill Service Index')),
+                    subtitle: Text(
+                      l10n.tr(
+                        'Chrome ve diğer uygulamalarda parola/TOTP önerisi için şifreli önbellek tutar',
+                        'Keeps Keystore-encrypted cache for Chrome & app autofill',
+                      ),
+                    ),
+                    value: settings.autofillEnabled,
+                    onChanged: (v) async {
+                      await settings.setAutofillEnabled(v);
+                      await vault.syncAutofillIndex(v);
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.open_in_new),
+                    title: Text(
+                      l10n.tr('Android Otomatik Doldurma Servisini Seç', 'Open Android Autofill Settings'),
+                    ),
+                    subtitle: Text(
+                      l10n.tr(
+                        'Sistem ayarlarında MultiPad\'i varsayılan sağlayıcı yapın',
+                        'Set MultiPad as your system autofill service',
+                      ),
+                    ),
+                    onTap: () {
+                      final auth = context.read<AuthProvider>();
+                      auth.runWithoutAutoLockUntilResumed(
+                        NativeBridgeService.openAndroidAutofillSettings,
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ],
+          ],
+
+          _SectionHeader(l10n.secData, icon: Icons.inventory_2_outlined),
+          _SettingsCard(
+            children: [
+              if (vault.hasConflicts)
+                ListTile(
+                  leading: const Icon(Icons.merge_type, color: Colors.orangeAccent),
+                  title: Text('${l10n.conflictsTitle} (${vault.conflicts.length})'),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const ConflictsScreen()),
+                  ),
+                ),
+
+              ListTile(
+                leading: const Icon(Icons.file_upload_outlined),
+                title: Text(l10n.importPasswords),
+                subtitle: Text(
+                  l10n.tr(
+                    'Chrome, Edge, Bitwarden veya KeePass içe aktarımı',
+                    'Import from Chrome, Edge, Bitwarden or KeePass',
+                  ),
+                ),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const ImportScreen()),
+                ),
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.backup_outlined),
+                title: Text(l10n.backup),
+                subtitle: Text(
+                  l10n.tr(
+                    'Argon2id + AES-GCM şifreli taşınabilir yedek dosyası',
+                    'Argon2id + AES-GCM encrypted portable backup',
+                  ),
+                ),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const BackupScreen()),
+                ),
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.devices_outlined),
+                title: Text(l10n.devicePairing),
+                subtitle: Text(
+                  l10n.tr(
+                    'Aynı ağda veya aktarım koduyla başka cihaza kurulum gönder',
+                    'Transfer vault credentials to another device via LAN or code',
+                  ),
+                ),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        const DevicePairingScreen(initialRole: PairingRole.send),
+                  ),
+                ),
+              ),
+
+              if (!auth.isDuressMode)
+                ListTile(
+                  leading: Icon(
+                    isCloudConnected ? Icons.cloud_done_outlined : Icons.cloud_off_outlined,
+                    color: isCloudConnected ? Colors.green : null,
+                  ),
+                  title: Text(l10n.tr('Bulut Senkronizasyonu (Supabase)', 'Cloud Sync (Supabase)')),
+                  subtitle: Text(
+                    isCloudConnected
+                        ? (auth.currentUserEmail ?? SupabaseService.currentUser?.email ?? 'Connected')
+                        : l10n.tr('Bağlı değil — bağlamak için dokunun', 'Not connected — tap to connect'),
+                  ),
+                  onTap: () => isCloudConnected
+                      ? vault.loadVault()
+                      : _openCloudConnectDialog(auth, vault),
+                ),
+
+              ListTile(
+                leading: _checkingUpdate
+                    ? const SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.system_update_outlined),
+                title: Text(l10n.tr('Güncellemeleri Denetle', 'Check for Updates')),
+                subtitle: Text('MultiPad v${AppConstants.appVersion}'),
+                onTap: _checkingUpdate ? null : _checkForUpdates,
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.info_outline),
+                title: Text(l10n.tr('Sürüm Bilgisi', 'Version')),
+                subtitle: Text(
+                  'v${AppConstants.appVersion} (Build ${AppConstants.buildNumber})',
+                ),
+                onTap: _handleVersionTap,
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 8),
+          _SettingsCard(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.lock_outline),
+                title: Text(l10n.lockVault),
+                onTap: () {
+                  Navigator.of(context).popUntil((r) => r.isFirst);
+                  auth.lockVault(reason: 'settings_lock');
+                },
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.logout, color: Colors.redAccent),
+                title: Text(
+                  l10n.logout,
+                  style: const TextStyle(color: Colors.redAccent),
+                ),
+                onTap: () async {
+                  final navigator = Navigator.of(context);
+                  final ok = await showDialog<bool>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: Text(l10n.logout),
+                      content: Text(
+                        l10n.tr(
+                          'Bu cihazdaki oturum kapatılacak ve önbellek temizlenecek. Devam edilsin mi?',
+                          'Sign out and clear active session on this device?',
+                        ),
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(ctx).pop(false),
+                          child: Text(l10n.cancel),
+                        ),
+                        FilledButton(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.redAccent,
+                          ),
+                          onPressed: () => Navigator.of(ctx).pop(true),
+                          child: Text(l10n.logout),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (ok == true && mounted) {
+                    navigator.popUntil((r) => r.isFirst);
+                    await auth.logout();
+                  }
+                },
+              ),
+            ],
           ),
         ],
       ),
@@ -1683,18 +1540,395 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
 class _SectionHeader extends StatelessWidget {
   final String text;
-  const _SectionHeader(this.text);
+  final IconData? icon;
+  const _SectionHeader(this.text, {this.icon});
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
-      child: Text(
-        text.toUpperCase(),
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-          letterSpacing: 0.9,
-          fontWeight: FontWeight.bold,
-          color: Theme.of(context).colorScheme.primary,
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 6),
+      child: Row(
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 16, color: theme.colorScheme.primary),
+            const SizedBox(width: 8),
+          ],
+          Expanded(
+            child: Text(
+              text.toUpperCase(),
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.labelSmall?.copyWith(
+                letterSpacing: 1.1,
+                fontWeight: FontWeight.bold,
+                color: theme.colorScheme.primary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SettingsCard extends StatelessWidget {
+  final List<Widget> children;
+
+  const _SettingsCard({
+    required this.children,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (children.isEmpty) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      elevation: 0,
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
+          width: 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (int i = 0; i < children.length; i++) ...[
+            children[i],
+            if (i < children.length - 1)
+              Divider(
+                height: 1,
+                thickness: 1,
+                indent: 56,
+                endIndent: 16,
+                color: theme.colorScheme.outlineVariant.withValues(alpha: 0.25),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _BrowserBridgeCard extends StatefulWidget {
+  const _BrowserBridgeCard();
+
+  @override
+  State<_BrowserBridgeCard> createState() => _BrowserBridgeCardState();
+}
+
+class _BrowserBridgeCardState extends State<_BrowserBridgeCard> {
+  bool _copied = false;
+  Timer? _copyTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    BrowserBridgeService.instance?.addListener(_onBridgeChanged);
+  }
+
+  @override
+  void dispose() {
+    _copyTimer?.cancel();
+    BrowserBridgeService.instance?.removeListener(_onBridgeChanged);
+    super.dispose();
+  }
+
+  void _onBridgeChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _copyPin(String pin, int timeout) {
+    ClipboardService.copySecurely(pin, timeoutSeconds: timeout);
+    setState(() => _copied = true);
+    _copyTimer?.cancel();
+    _copyTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _copied = false);
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          context.l10n.copiedWithTimeout('PIN', timeout),
+        ),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  void _regeneratePin() {
+    final bridge = BrowserBridgeService.instance;
+    if (bridge != null) {
+      bridge.rotatePairingToken();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            context.l10n.tr(
+              'Yeni eşleştirme PIN\'i oluşturuldu.',
+              'New pairing PIN generated.',
+            ),
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  String _formatPin(String rawPin) {
+    if (rawPin.isEmpty) return '------';
+    return rawPin.split('').join(' ');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final l10n = context.l10n;
+    final settings = context.watch<SettingsProvider>();
+    final bridge = BrowserBridgeService.instance;
+
+    final isRunning = bridge?.isPortBound ?? bridge?.isRunning ?? false;
+    final port = bridge?.port != null && bridge!.port > 0
+        ? bridge.port
+        : BrowserBridgeService.defaultPort;
+    final pairingCode = bridge?.pairingCode ?? '849201';
+    final formattedPin = _formatPin(pairingCode);
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      elevation: 0,
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
+          width: 1,
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Status Header Row
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(
+                    Icons.extension_rounded,
+                    color: theme.colorScheme.onPrimaryContainer,
+                    size: 22,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        l10n.tr(
+                          'Tarayıcı Köprüsü',
+                          'Browser Extension Bridge',
+                        ),
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '127.0.0.1:$port',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          fontFamily: 'monospace',
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: isRunning
+                        ? Colors.green.withValues(alpha: 0.12)
+                        : Colors.orange.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: isRunning
+                          ? Colors.green.withValues(alpha: 0.4)
+                          : Colors.orange.withValues(alpha: 0.4),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: isRunning ? Colors.green : Colors.orange,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        isRunning
+                            ? l10n.tr('Çalışıyor', 'Running')
+                            : l10n.tr('Durduruldu', 'Stopped'),
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: isRunning ? Colors.green : Colors.orange,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // PIN Display Box
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHighest.withValues(
+                  alpha: 0.4,
+                ),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
+                ),
+              ),
+              child: Column(
+                children: [
+                  Text(
+                    l10n.tr('EŞLEŞTİRME PIN KODU', 'PAIRING PIN CODE'),
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      letterSpacing: 1.5,
+                      fontWeight: FontWeight.w600,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  SelectableText(
+                    formattedPin,
+                    key: const ValueKey('bridge_pairing_pin_text'),
+                    style: theme.textTheme.headlineMedium?.copyWith(
+                      fontFamily: 'monospace',
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 8,
+                      color: theme.colorScheme.primary,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 8,
+                    alignment: WrapAlignment.center,
+                    children: [
+                      FilledButton.tonalIcon(
+                        key: const ValueKey('btn_copy_pairing_pin'),
+                        onPressed: () => _copyPin(
+                          pairingCode,
+                          settings.clipboardTimeoutSeconds,
+                        ),
+                        icon: Icon(
+                          _copied ? Icons.check_rounded : Icons.copy_rounded,
+                          size: 18,
+                        ),
+                        label: Text(
+                          _copied
+                              ? l10n.copied
+                              : l10n.tr("PIN'i Kopyala", 'Copy PIN'),
+                        ),
+                      ),
+                      OutlinedButton.icon(
+                        key: const ValueKey('btn_regenerate_pairing_pin'),
+                        onPressed: _regeneratePin,
+                        icon: const Icon(Icons.refresh_rounded, size: 18),
+                        label: Text(
+                          l10n.tr('Yeni PIN Üret', 'Regenerate PIN'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Instructions Box
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerLow,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.info_outline,
+                        size: 16,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        l10n.tr(
+                          'Tarayıcı Eklentisini Eşleştirme',
+                          'How to Pair Browser Extension',
+                        ),
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    l10n.tr(
+                      '1. Chrome, Edge veya Firefox MultiPad eklentisini açın.\n'
+                      '2. Yukarıdaki 6 haneli PIN kodunu girin.\n'
+                      '3. "MultiPad ile Eşleştir" butonuna tıklayın.',
+                      '1. Open MultiPad extension in Chrome, Edge, or Firefox.\n'
+                      '2. Enter the 6-digit PIN code displayed above.\n'
+                      '3. Click "Pair with MultiPad" to connect.',
+                    ),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      height: 1.5,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    l10n.tr(
+                      '🔒 Eşleştirme yalnızca yerel döngü (127.0.0.1:48292) üzerinden gerçekleşir. İnternete veri gönderilmez.',
+                      '🔒 Pairing operates strictly over local loopback (127.0.0.1:48292). No data leaves your computer.',
+                    ),
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant.withValues(
+                        alpha: 0.8,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );

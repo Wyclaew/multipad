@@ -72,6 +72,38 @@ class AppDelegate: FlutterAppDelegate, NSWindowDelegate {
       case "setMulticastLock":
         result(true)
 
+      case "windowMinimize":
+        DispatchQueue.main.async {
+          (self.attachedWindow ?? self.mainFlutterWindow)?.miniaturize(nil)
+        }
+        result(true)
+
+      case "windowMaximize":
+        DispatchQueue.main.async {
+          (self.attachedWindow ?? self.mainFlutterWindow)?.zoom(nil)
+        }
+        result(true)
+
+      case "windowClose":
+        DispatchQueue.main.async {
+          (self.attachedWindow ?? self.mainFlutterWindow)?.performClose(nil)
+        }
+        result(true)
+
+      case "isWindowMaximized":
+        let isZoomed = (self.attachedWindow ?? self.mainFlutterWindow)?.isZoomed ?? false
+        result(isZoomed)
+
+      case "windowStartDragging":
+        DispatchQueue.main.async {
+          if let window = self.attachedWindow ?? self.mainFlutterWindow {
+            if let event = NSApp.currentEvent {
+              window.performDrag(with: event)
+            }
+          }
+        }
+        result(true)
+
       default:
         result(FlutterMethodNotImplemented)
       }

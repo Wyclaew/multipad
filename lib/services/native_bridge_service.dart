@@ -136,6 +136,67 @@ class NativeBridgeService {
     }
   }
 
+  /// Minimizes the desktop window.
+  static Future<void> windowMinimize() async {
+    if (kIsWeb || !(Platform.isMacOS || Platform.isWindows)) return;
+    try {
+      await _channel.invokeMethod('windowMinimize');
+    } on MissingPluginException {
+      // Ignored in tests
+    } catch (e) {
+      debugPrint('windowMinimize error: $e');
+    }
+  }
+
+  /// Toggles maximize / restore on the desktop window.
+  static Future<void> windowMaximize() async {
+    if (kIsWeb || !(Platform.isMacOS || Platform.isWindows)) return;
+    try {
+      await _channel.invokeMethod('windowMaximize');
+    } on MissingPluginException {
+      // Ignored in tests
+    } catch (e) {
+      debugPrint('windowMaximize error: $e');
+    }
+  }
+
+  /// Closes the desktop window (honors tray preferences).
+  static Future<void> windowClose() async {
+    if (kIsWeb || !(Platform.isMacOS || Platform.isWindows)) return;
+    try {
+      await _channel.invokeMethod('windowClose');
+    } on MissingPluginException {
+      // Ignored in tests
+    } catch (e) {
+      debugPrint('windowClose error: $e');
+    }
+  }
+
+  /// Checks if the desktop window is currently maximized.
+  static Future<bool> isWindowMaximized() async {
+    if (kIsWeb || !(Platform.isMacOS || Platform.isWindows)) return false;
+    try {
+      final res = await _channel.invokeMethod<bool>('isWindowMaximized');
+      return res ?? false;
+    } on MissingPluginException {
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// Initiates native window dragging on mouse down.
+  static Future<void> windowStartDragging() async {
+    if (kIsWeb || !(Platform.isMacOS || Platform.isWindows)) return;
+    try {
+      await _channel.invokeMethod('windowStartDragging');
+    } on MissingPluginException {
+      // Ignored in tests
+    } catch (e) {
+      debugPrint('windowStartDragging error: $e');
+    }
+  }
+
   /// Pushes hardware-encrypted Android Autofill credential index (or empties it on lock).
   static Future<void> updateAutofillIndex(
     List<Map<String, String>> entries,

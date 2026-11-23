@@ -1,7 +1,8 @@
 # MultiPad 🔐
 ### Zero-Knowledge, Cross-Platform Password Manager & Encrypted Vault
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg?style=flat-square)](https://github.com/multipad/multipad)
+[![Version](https://img.shields.io/badge/version-1.4.0-blue.svg?style=flat-square)](https://github.com/Wyclaew/multipad/releases/tag/v1.4.0)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg?style=flat-square)](https://github.com/Wyclaew/multipad)
 [![E2E Test Suite](https://img.shields.io/badge/e2e%20tests-140%2F140%20passing-success.svg?style=flat-square)](test_e2e/)
 [![Security](https://img.shields.io/badge/cryptography-Argon2id%20%7C%20AES--256--GCM-blue.svg?style=flat-square)](#-cryptographic-architecture--security-model)
 [![Zero-Knowledge](https://img.shields.io/badge/privacy-zero--knowledge-blueviolet.svg?style=flat-square)](#-security-principles)
@@ -16,6 +17,7 @@ Your master password and unencrypted credentials **never leave your device**. Al
 
 ## 📑 Table of Contents
 
+- [v1.4.0 Release Highlights](#-v140-release-highlights)
 - [Key Highlights](#-key-highlights)
 - [System Architecture](#-system-architecture)
 - [Cryptographic Architecture & Security Model](#-cryptographic-architecture--security-model)
@@ -37,6 +39,50 @@ Your master password and unencrypted credentials **never leave your device**. Al
 - [Project Directory Structure](#-project-directory-structure)
 - [MultiPad vs. Bitwarden Security Summary](#-multipad-vs-bitwarden-security-summary)
 - [Contributing & License](#-contributing--license)
+
+---
+
+## 🚀 v1.4.0 Release Highlights
+
+MultiPad **v1.4.0** represents a comprehensive modernization of the user interface across all platforms, enterprise-grade autofill enhancements on Android and Desktop Web Extensions, desktop frameless window styling, a dedicated Windows Inno Setup installer, and seamless in-place updates:
+
+1. **Material 3 UI Modernization**:
+   - Modernized responsive user experience across Android, macOS, and Windows.
+   - Refined slate/indigo color tokens with surface elevation tiers (`surfaceContainerLow/High`), subtle outlines (`outlineVariant`), and monospace secret typography.
+   - Responsive mobile navigation featuring a bottom `NavigationBar` on screens $< 780\text{px}$ and 3-pane master-detail layout on desktop.
+   - Polished vault item cards with hover elevation, category pills, and in-place localized copy micro-interactions.
+   - Responsive password generator with interactive 4-segment entropy gauge and EFF Diceware passphrase support.
+   - Fast desktop command palette (`QuickSearchDialog`) with full keyboard navigation (Arrow Up/Down, Enter, Tab, Escape).
+
+2. **Android 11+ Inline Suggestions & RemoteViews Autofill**:
+   - Upgraded `MultiPadAutofillService` supporting Android 11+ `InlineSuggestionsRequest` with IME keyboard chip presentation (Gboard, SwiftKey).
+   - Branded custom `RemoteViews` dropdown layouts (`autofill_dataset_item.xml`) with theme-adaptive colors.
+   - Multi-step context aggregation across backwards fill contexts for seamless 2-step login flows.
+   - Split-field multi-box OTP distribution distributing 6-digit TOTP character-by-character into single-character input boxes.
+   - Browser URL bar fallback domain extraction for web browsers where `webDomain` is null.
+   - Dynamic package alias dictionary mapping popular Android applications to their vault domains.
+
+3. **Manifest V3 Web Browser Extension**:
+   - In-field MultiPad shield badge with closed Shadow DOM style isolation.
+   - Viewport-relative fixed floating dropdown with live scroll and resize coordinate tracking.
+   - Prototype property descriptor injection with synthetic event dispatching for reactive single-page frameworks (React, Vue, Angular).
+   - Automated live TOTP clipboard copy upon credential autofill with toast notifications (`clipboardWrite` permission).
+   - Modernized 380x520px extension popup with SVG iconography, inline password generator tab, and live TOTP ticker countdown.
+
+4. **Desktop Frameless Window Chrome**:
+   - Modern borderless frameless window styling on macOS AppKit (`NSWindow.titleBarStyle = .hidden`, `fullSizeContentView`, inset traffic light controls).
+   - Custom borderless chrome on Windows Win32 with custom draggable titlebar, minimize, maximize/restore, and close buttons (`lib/widgets/desktop_title_bar.dart`).
+
+5. **Windows Installer (`MultiPad-Windows-Setup.exe`)**:
+   - Production Inno Setup installer script (`windows/installer/multipad_setup.iss`).
+   - Supports both per-user AppData installation (no admin privileges required) and administrative Program Files installation.
+   - Automatically registers in Windows Add/Remove Programs, creates Start Menu and Desktop shortcuts, and supports silent flags (`/VERYSILENT /SUPPRESSMSGBOXES`).
+
+6. **Seamless In-Place In-App Updates**:
+   - Automated in-place updates without manual deletion:
+     - **Android**: FileProvider APK install intent triggers in-place package updates preserving SQLite vault and Keystore credentials.
+     - **macOS**: In-place helper script replaces `MultiPad.app` directly in `/Applications/` and relaunches seamlessly.
+     - **Windows**: Setup installer executes in-place update directly over the existing installation.
 
 ---
 
@@ -201,8 +247,9 @@ flutter build appbundle --release
 # macOS Application Bundle (.app / .dmg)
 flutter build macos --release
 
-# Windows Executable
+# Windows Executable & Inno Setup Installer
 flutter build windows --release
+iscc /DAppVersion=1.4.0 windows/installer/multipad_setup.iss
 
 # Linux Binary
 flutter build linux --release
@@ -255,7 +302,7 @@ flutter test test_e2e/tier4_real_world_scenarios_test.dart
 MultiPad/
 ├── lib/
 │   ├── main.dart                          # Application entry point & lifecycle observer
-│   ├── constants.dart                     # Cryptographic & storage configuration constants
+│   ├── constants.dart                     # Design tokens (AppThemeConstants) & app version (1.4.0)
 │   ├── models/
 │   │   ├── vault_item.dart                # Polymorphic vault items & custom fields model
 │   │   ├── vault_folder.dart              # Folder hierarchy model
@@ -263,7 +310,7 @@ MultiPad/
 │   ├── providers/
 │   │   ├── auth_provider.dart             # Master key lifecycle, biometrics & auto-lock
 │   │   ├── settings_provider.dart         # Preferences (lockOnBackground, 2FA intervals)
-│   │   └── vault_provider.dart            # Fast SWR loading, parallel decryption, search & A-Z sort
+│   │   └── vault_provider.dart            # Fast SWR loading, parallel decryption, pending capture
 │   ├── services/
 │   │   ├── crypto_service.dart            # Argon2id, AES-256-GCM, PBKDF2 & Bitwarden cipher
 │   │   ├── totp_ticker_service.dart       # Centralized lifecycle-aware broadcast TOTP ticker
@@ -273,29 +320,41 @@ MultiPad/
 │   │   ├── audit_service.dart             # Calibrated vault audit (no 2FA deduction)
 │   │   ├── totp_service.dart              # RFC 6238 TOTP generator (SHA1/SHA256/SHA512)
 │   │   ├── clipboard_service.dart         # Secure auto-clearing clipboard
+│   │   ├── update_service.dart            # In-place updates (APK, macOS helper, Windows setup)
+│   │   ├── pending_capture_coordinator.dart # Autofill credential capture lifecycle coordinator
 │   │   └── native_bridge_service.dart     # Platform channels for FLAG_SECURE & autofill
 │   ├── screens/
 │   │   ├── auth_screen.dart               # Startup biometric trigger & bottom-right circular FAB
-│   │   ├── home_screen.dart               # Bitwarden-style 3-pane layout & quick action bar
+│   │   ├── home_screen.dart               # Modern Material 3 responsive layout & NavigationBar
 │   │   ├── import_screen.dart             # Encrypted file inspection & password prompt
-│   │   ├── settings_screen.dart           # macOS background lock toggle & 2FA interval choice
+│   │   ├── settings_screen.dart           # Extension bridge pairing card & preferences
 │   │   └── credential_editor_screen.dart  # Multi-field credential editor
 │   └── widgets/
 │       ├── credential_detail_pane.dart    # Dedicated read-only inspector with radial TOTP
-│       ├── password_generator_dialog.dart # 7,776-word EFF Diceware generator & history
-│       └── vault_item_card.dart           # Lightweight card hooked to central TOTP ticker
+│       ├── password_generator_dialog.dart # Modern responsive generator with 4-segment entropy gauge
+│       ├── quick_search_dialog.dart       # Command palette with full keyboard navigation
+│       ├── desktop_title_bar.dart         # Custom frameless window titlebar for desktop
+│       ├── update_dialog.dart             # In-place update prompt with SHA-256 verification
+│       ├── pending_capture_dialog.dart    # In-app credential save & update prompt
+│       └── vault_item_card.dart           # Polished card with in-place copy micro-interactions
 ├── android/
-│   └── app/src/main/kotlin/com/multipad/multipad/
-│       ├── MainActivity.kt                # Cold-boot FLAG_SECURE window protection
-│       ├── MultiPadAutofillService.kt     # System AutofillService with SaveInfo capture
-│       ├── AutofillCryptoStore.kt         # Secure store for cached autofill entries
-│       └── MultiPadQuickTileService.kt    # Android Quick Settings tile service
+│   └── app/src/main/
+│       ├── res/layout/
+│       │   └── autofill_dataset_item.xml  # Branded custom RemoteViews layout
+│       └── kotlin/com/multipad/multipad/
+│           ├── MainActivity.kt            # Cold-boot FLAG_SECURE window protection
+│           ├── MultiPadAutofillService.kt # Android 11+ inline suggestions, split OTP, multi-step
+│           ├── AutofillCryptoStore.kt     # Secure Keystore store for cached autofill entries
+│           └── MultiPadQuickTileService.kt # Android Quick Settings tile service
 ├── extension/
-│   ├── manifest.json                      # Manifest V3 browser extension configuration
+│   ├── manifest.json                      # Manifest V3 browser extension configuration (v1.4.0)
 │   ├── background.js                      # Service worker communicating with 127.0.0.1:48292
-│   ├── content.js                         # Form detection, inline autofill & submit capture
-│   └── popup.html / popup.js              # Extension popup UI & pairing manager
-├── test/                                  # Unit, cryptographic, and regression tests
+│   ├── content.js                         # In-field badge, floating dropdown, reactive injection
+│   └── popup.html / popup.js / popup.css  # 380x520px popup UI & inline password generator
+├── windows/
+│   └── installer/
+│       └── multipad_setup.iss             # Inno Setup Windows installer script (MultiPad-Windows-Setup.exe)
+├── test/                                  # Comprehensive unit, widget, and platform tests
 ├── test_e2e/                              # 140/140 E2E tests across Tiers 1-4
 ├── README.md                              # This documentation file
 └── SECURITY_COMPARISON.md                 # Concise Bitwarden security comparison report

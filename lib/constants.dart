@@ -1,7 +1,9 @@
 // MultiPad Global Configuration Constants
 
+import 'package:flutter/material.dart';
+
 class AppConstants {
-  static const String appVersion = '1.3.1';
+  static const String appVersion = '1.4.0';
   static const int buildNumber = 4;
 
   // Can be configured here or entered directly in the app's Setup / Settings screen.
@@ -64,3 +66,54 @@ class AppConstants {
   static const int argon2Parallelism = 1;
   static const int keyLength = 32; // 256-bit key for AES-GCM
 }
+
+/// Centralized Design System Tokens for Material 3 Theme Overhaul
+class AppThemeConstants {
+  // Brand & Slate/Indigo Palette
+  static const Color indigoLight = Color(0xFF4338CA); // Deep indigo 700
+  static const Color indigoDark = Color(0xFF818CF8);  // Vibrant indigo 400
+  static const Color slateLight = Color(0xFF475569);  // Slate 600
+  static const Color slateDark = Color(0xFF94A3B8);   // Slate 400
+
+  // Surface Elevation Tiers - Light Mode
+  static const Color lightBg = Color(0xFFF8FAFC);
+  static const Color lightSurface = Color(0xFFFFFFFF);
+  static const Color lightSurfaceContainerLowest = Color(0xFFFFFFFF);
+  static const Color lightSurfaceContainerLow = Color(0xFFF8FAFC);
+  static const Color lightSurfaceContainer = Color(0xFFF1F5F9);
+  static const Color lightSurfaceContainerHigh = Color(0xFFE2E8F0);
+  static const Color lightSurfaceContainerHighest = Color(0xFFCBD5E1);
+  static const Color lightOutline = Color(0xFF94A3B8);
+  static const Color lightOutlineVariant = Color(0xFFE2E8F0);
+
+  // Surface Elevation Tiers - Dark Mode (Slate)
+  static const Color darkBg = Color(0xFF0F172A);
+  static const Color darkSurface = Color(0xFF1E293B);
+  static const Color darkSurfaceContainerLowest = Color(0xFF0B1120);
+  static const Color darkSurfaceContainerLow = Color(0xFF131D31);
+  static const Color darkSurfaceContainer = Color(0xFF1E293B);
+  static const Color darkSurfaceContainerHigh = Color(0xFF27354E);
+  static const Color darkSurfaceContainerHighest = Color(0xFF334155);
+  static const Color darkOutline = Color(0xFF64748B);
+  static const Color darkOutlineVariant = Color(0xFF334155);
+
+  // Surface Elevation Tiers - AMOLED Pure Black Mode
+  static const Color amoledBg = Color(0xFF000000);
+  static const Color amoledSurface = Color(0xFF050508);
+  static const Color amoledSurfaceContainerLowest = Color(0xFF000000);
+  static const Color amoledSurfaceContainerLow = Color(0xFF0A0A0E);
+  static const Color amoledSurfaceContainer = Color(0xFF111116);
+  static const Color amoledSurfaceContainerHigh = Color(0xFF1A1A22);
+  static const Color amoledSurfaceContainerHighest = Color(0xFF262630);
+  static const Color amoledOutline = Color(0xFF3F3F46);
+  static const Color amoledOutlineVariant = Color(0xFF27272A);
+
+  // Monospace Typography Style for Sensitive Secrets & Codes
+  static const String monospaceFontFamily = 'monospace';
+  static const TextStyle secretTextStyle = TextStyle(
+    fontFamily: monospaceFontFamily,
+    letterSpacing: 1.2,
+    fontWeight: FontWeight.w600,
+  );
+}
+

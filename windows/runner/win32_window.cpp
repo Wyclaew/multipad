@@ -1,6 +1,7 @@
 #include "win32_window.h"
 
 #include <dwmapi.h>
+#include <windowsx.h>
 #include <flutter_windows.h>
 
 #include "resource.h"
@@ -144,6 +145,9 @@ bool Win32Window::Create(const std::wstring& title,
     return false;
   }
 
+  MARGINS margins = { 0, 0, 1, 0 };
+  DwmExtendFrameIntoClientArea(window, &margins);
+
   UpdateTheme(window);
 
   return OnCreate();
@@ -179,6 +183,46 @@ Win32Window::MessageHandler(HWND hwnd,
                             WPARAM const wparam,
                             LPARAM const lparam) noexcept {
   switch (message) {
+    case WM_NCCALCSIZE: {
+      if (wparam == TRUE) {
+        auto params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
+        if (::IsZoomed(hwnd)) {
+          HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+          MONITORINFO monitor_info = { sizeof(MONITORINFO) };
+          if (GetMonitorInfo(monitor, &monitor_info)) {
+            params->rgrc[0] = monitor_info.rcWork;
+          }
+        }
+        return 0;
+      }
+      return 0;
+    }
+
+    case WM_NCHITTEST: {
+      if (::IsZoomed(hwnd)) {
+        break;
+      }
+      POINT pt = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+      RECT rc;
+      GetWindowRect(hwnd, &rc);
+      const int borderWidth = 6;
+
+      bool left = pt.x >= rc.left && pt.x < rc.left + borderWidth;
+      bool right = pt.x < rc.right && pt.x >= rc.right - borderWidth;
+      bool top = pt.y >= rc.top && pt.y < rc.top + borderWidth;
+      bool bottom = pt.y < rc.bottom && pt.y >= rc.bottom - borderWidth;
+
+      if (top && left) return HTTOPLEFT;
+      if (top && right) return HTTOPRIGHT;
+      if (bottom && left) return HTBOTTOMLEFT;
+      if (bottom && right) return HTBOTTOMRIGHT;
+      if (left) return HTLEFT;
+      if (right) return HTRIGHT;
+      if (top) return HTTOP;
+      if (bottom) return HTBOTTOM;
+      break;
+    }
+
     case WM_DESTROY:
       window_handle_ = nullptr;
       Destroy();

@@ -50,17 +50,24 @@ class UpdateInfo {
       );
     } else if (Platform.isMacOS) {
       return assets.firstWhere(
-        (a) =>
-            a.name.toLowerCase().endsWith('.dmg') ||
-            a.name.toLowerCase().endsWith('.zip'),
-        orElse: () => assets.first,
+        (a) => a.name.toLowerCase().endsWith('.dmg'),
+        orElse: () => assets.firstWhere(
+          (a) =>
+              (a.name.toLowerCase().contains('mac') &&
+                  a.name.toLowerCase().endsWith('.zip')) ||
+              a.name.toLowerCase().endsWith('.zip'),
+          orElse: () => assets.first,
+        ),
       );
     } else if (Platform.isWindows) {
       return assets.firstWhere(
         (a) =>
-            a.name.toLowerCase().endsWith('.zip') ||
+            a.name.toLowerCase().endsWith('-setup.exe') ||
             a.name.toLowerCase().endsWith('.exe'),
-        orElse: () => assets.first,
+        orElse: () => assets.firstWhere(
+          (a) => a.name.toLowerCase().endsWith('.zip'),
+          orElse: () => assets.first,
+        ),
       );
     }
     return assets.first;
@@ -185,6 +192,8 @@ class UpdateService {
     ReleaseAsset asset, {
     void Function(double progress)? onProgress,
     void Function(String status)? onStatus,
+    bool inPlace = false,
+    bool installImmediately = true,
     @visibleForTesting http.Client? httpClient,
     @visibleForTesting Future<Directory> Function()? tempDirProvider,
     @visibleForTesting
@@ -202,55 +211,77 @@ class UpdateService {
         : getTemporaryDirectory());
     final safeFileName = p.basename(asset.name);
     final destFile = File(p.join(tmpDir.path, 'multipad_update_$safeFileName'));
-    if (destFile.existsSync()) {
-      await destFile.delete();
-    }
-
-    final ownsClient = httpClient == null;
-    final client = httpClient ?? http.Client();
-    try {
-      final request = http.Request('GET', Uri.parse(asset.downloadUrl));
-      request.headers['User-Agent'] = 'MultiPad-Updater';
-      final response =
-          await client.send(request).timeout(const Duration(seconds: 30));
-      if (response.statusCode != 200) {
-        throw Exception('İndirme başarısız (HTTP ${response.statusCode}).');
-      }
-
-      final totalBytes = response.contentLength ?? asset.size;
-      var receivedBytes = 0;
-      final sink = destFile.openWrite();
-      try {
-        await for (final chunk in response.stream) {
-          sink.add(chunk);
-          receivedBytes += chunk.length;
-          if (totalBytes > 0) {
-            onProgress?.call((receivedBytes / totalBytes).clamp(0.0, 1.0));
-          }
-        }
-      } finally {
-        await sink.flush();
-        await sink.close();
-      }
-    } finally {
-      if (ownsClient) {
-        client.close();
-      }
-    }
-
-    // Verify SHA-256 integrity
-    onStatus?.call('SHA-256 bütünlük doğrulaması yapılıyor...');
-    final fileBytes = await destFile.readAsBytes();
-    final actualSha = CryptoService.sha256HexBytes(fileBytes).toLowerCase();
+    bool usedCachedFile = false;
     final hasExpectedSha =
         asset.expectedSha256 != null && asset.expectedSha256!.isNotEmpty;
-    if (hasExpectedSha) {
-      if (actualSha != asset.expectedSha256!.toLowerCase()) {
-        await destFile.delete();
-        throw Exception(
-          'SHA-256 doğrulama hatası! İndirilen dosya bozuk veya değiştirilmiş olabilir.',
-        );
+
+    // Cache verification: if file exists and SHA-256 matches, reuse it directly
+    if (destFile.existsSync()) {
+      if (hasExpectedSha) {
+        try {
+          final existingBytes = await destFile.readAsBytes();
+          final existingSha = CryptoService.sha256HexBytes(existingBytes).toLowerCase();
+          if (existingSha == asset.expectedSha256!.toLowerCase()) {
+            usedCachedFile = true;
+            onStatus?.call('Doğrulanmış dosya önbellekten yükleniyor...');
+            onProgress?.call(1.0);
+          }
+        } catch (_) {}
       }
+      if (!usedCachedFile) {
+        await destFile.delete();
+      }
+    }
+
+    if (!usedCachedFile) {
+      final ownsClient = httpClient == null;
+      final client = httpClient ?? http.Client();
+      try {
+        final request = http.Request('GET', Uri.parse(asset.downloadUrl));
+        request.headers['User-Agent'] = 'MultiPad-Updater';
+        final response =
+            await client.send(request).timeout(const Duration(seconds: 30));
+        if (response.statusCode != 200) {
+          throw Exception('İndirme başarısız (HTTP ${response.statusCode}).');
+        }
+
+        final totalBytes = response.contentLength ?? asset.size;
+        var receivedBytes = 0;
+        final sink = destFile.openWrite();
+        try {
+          await for (final chunk in response.stream) {
+            sink.add(chunk);
+            receivedBytes += chunk.length;
+            if (totalBytes > 0) {
+              onProgress?.call((receivedBytes / totalBytes).clamp(0.0, 1.0));
+            }
+          }
+        } finally {
+          await sink.flush();
+          await sink.close();
+        }
+      } finally {
+        if (ownsClient) {
+          client.close();
+        }
+      }
+
+      // Verify SHA-256 integrity
+      onStatus?.call('SHA-256 bütünlük doğrulaması yapılıyor...');
+      final fileBytes = await destFile.readAsBytes();
+      final actualSha = CryptoService.sha256HexBytes(fileBytes).toLowerCase();
+      if (hasExpectedSha) {
+        if (actualSha != asset.expectedSha256!.toLowerCase()) {
+          await destFile.delete();
+          throw Exception(
+            'SHA-256 doğrulama hatası! İndirilen dosya bozuk veya değiştirilmiş olabilir.',
+          );
+        }
+      }
+    }
+
+    if (!installImmediately) {
+      return destFile.path;
     }
 
     final shaNote = hasExpectedSha
@@ -263,18 +294,242 @@ class UpdateService {
       await NativeBridgeService.installAndroidApk(destFile.path);
       return 'APK yükleyicisi başlatıldı$shaNote.';
     } else if (isMacOs) {
+      if (inPlace) {
+        return installMacOsInPlace(
+          destFile.path,
+          shaNote: shaNote,
+          detachedStarter: detachedProcessStarter,
+          tempDirProvider: tempDirProvider,
+        );
+      }
       return openMacOsInstaller(
         destFile.path,
         shaNote: shaNote,
         startDetached: detachedProcessStarter,
       );
     } else if (isMacOsOverride != true && Platform.isWindows) {
-      await _launchWindowsUpdater(destFile.path);
+      if (inPlace) {
+        return installWindowsInPlace(
+          destFile.path,
+          shaNote: shaNote,
+          detachedStarter: detachedProcessStarter,
+          tempDirProvider: tempDirProvider,
+        );
+      }
+      if (destFile.path.toLowerCase().endsWith('.exe')) {
+        await _launchWindowsInstaller(
+          destFile.path,
+          detachedStarter: detachedProcessStarter,
+          tempDirProvider: tempDirProvider,
+        );
+      } else {
+        await _launchWindowsUpdater(
+          destFile.path,
+          detachedStarter: detachedProcessStarter,
+          tempDirProvider: tempDirProvider,
+        );
+      }
       Timer(const Duration(milliseconds: 350), () => exit(0));
       return 'Güncelleme hazırlandı$shaNote; uygulama yeniden başlatılıyor...';
     }
 
     return destFile.path;
+  }
+
+  /// Detects the running .app bundle path by traversing parent directories of [Platform.resolvedExecutable],
+  /// or falls back to '/Applications/MultiPad.app'.
+  static String getMacOsAppBundlePath({String? executablePath}) {
+    final exePath = executablePath ?? Platform.resolvedExecutable;
+    var dir = Directory(exePath);
+    while (dir.path != '/' && dir.path != '.') {
+      if (dir.path.endsWith('.app')) {
+        return dir.path;
+      }
+      final parent = dir.parent;
+      if (parent.path == dir.path) break;
+      dir = parent;
+    }
+    return '/Applications/MultiPad.app';
+  }
+
+  /// Installs an update in-place on macOS via a detached bash helper script:
+  /// mounts DMG quietly, strips quarantine (xattr -cr), copies with ditto to staging,
+  /// moves atomically into place (mv), detaches DMG, and relaunches with open -a.
+  static Future<String> installMacOsInPlace(
+    String dmgOrZipPath, {
+    String shaNote = '',
+    Future<void> Function(String executable, List<String> arguments)?
+        detachedStarter,
+    String? targetAppPath,
+    int? processPid,
+    bool exitOnComplete = true,
+    @visibleForTesting Future<Directory> Function()? tempDirProvider,
+  }) async {
+    final currentPid = processPid ?? pid;
+    final targetApp = targetAppPath ?? getMacOsAppBundlePath();
+    final tmpDir = (await (tempDirProvider != null
+            ? tempDirProvider()
+            : getTemporaryDirectory()))
+        .path;
+    final scriptFile = File(p.join(tmpDir, 'multipad_mac_update.sh'));
+
+    final scriptContent = '''
+#!/bin/bash
+set -e
+PID="$currentPid"
+PKG="$dmgOrZipPath"
+TARGET="$targetApp"
+
+if [ -n "\$PID" ] && [ "\$PID" -gt 0 ] 2>/dev/null; then
+  while kill -0 "\$PID" 2>/dev/null; do
+    sleep 0.2
+  done
+fi
+
+MOUNT_DIR="/tmp/multipad_dmg_mount_\$\$"
+mkdir -p "\$MOUNT_DIR"
+
+cleanup() {
+  if [ -d "\$MOUNT_DIR" ]; then
+    hdiutil detach "\$MOUNT_DIR" -force 2>/dev/null || true
+    rm -rf "\$MOUNT_DIR"
+  fi
+}
+trap cleanup EXIT
+
+SRC_APP=""
+if [[ "\$PKG" == *.dmg ]]; then
+  hdiutil attach "\$PKG" -mountpoint "\$MOUNT_DIR" -nobrowse -readonly -quiet
+  SRC_APP="\$MOUNT_DIR/MultiPad.app"
+  if [ ! -d "\$SRC_APP" ]; then
+    SRC_APP=\$(find "\$MOUNT_DIR" -maxdepth 2 -name "*.app" | head -n 1)
+  fi
+elif [[ "\$PKG" == *.zip ]]; then
+  unzip -q -o "\$PKG" -d "\$MOUNT_DIR"
+  SRC_APP=\$(find "\$MOUNT_DIR" -maxdepth 2 -name "*.app" | head -n 1)
+fi
+
+if [ -z "\$SRC_APP" ] || [ ! -d "\$SRC_APP" ]; then
+  open "\$PKG"
+  exit 1
+fi
+
+xattr -cr "\$SRC_APP" 2>/dev/null || true
+
+TARGET_DIR=\$(dirname "\$TARGET")
+STAGE_DIR="\$TARGET_DIR/.MultiPad_updating.app"
+rm -rf "\$STAGE_DIR"
+ditto "\$SRC_APP" "\$STAGE_DIR"
+
+BACKUP_DIR="\$TARGET_DIR/.MultiPad_old.app"
+rm -rf "\$BACKUP_DIR"
+if [ -d "\$TARGET" ]; then
+  mv "\$TARGET" "\$BACKUP_DIR"
+fi
+
+if mv "\$STAGE_DIR" "\$TARGET"; then
+  rm -rf "\$BACKUP_DIR"
+else
+  if [ -d "\$BACKUP_DIR" ]; then
+    mv "\$BACKUP_DIR" "\$TARGET"
+  fi
+  open "\$PKG"
+  exit 1
+fi
+
+cleanup
+open -a "\$TARGET"
+''';
+
+    await scriptFile.writeAsString(scriptContent);
+    try {
+      await Process.run('chmod', ['+x', scriptFile.path]);
+    } catch (_) {}
+
+    if (detachedStarter != null) {
+      await detachedStarter('/bin/bash', [scriptFile.path]);
+    } else {
+      await Process.start('/bin/bash', [scriptFile.path],
+          mode: ProcessStartMode.detached);
+      if (exitOnComplete) {
+        Timer(const Duration(milliseconds: 350), () => exit(0));
+      }
+    }
+    return 'MultiPad güncelleniyor ve yeniden başlatılıyor$shaNote...';
+  }
+
+  /// Installs an update in-place on Windows.
+  /// If the file is an .exe installer, launches Inno Setup installer silently and relaunches.
+  /// If .zip, falls back to archive extraction into executable directory.
+  static Future<String> installWindowsInPlace(
+    String installerOrZipPath, {
+    String shaNote = '',
+    Future<void> Function(String executable, List<String> arguments)?
+        detachedStarter,
+    int? processPid,
+    bool exitOnComplete = true,
+    @visibleForTesting Future<Directory> Function()? tempDirProvider,
+  }) async {
+    if (installerOrZipPath.toLowerCase().endsWith('.exe')) {
+      await _launchWindowsInstaller(
+        installerOrZipPath,
+        detachedStarter: detachedStarter,
+        processPid: processPid,
+        tempDirProvider: tempDirProvider,
+      );
+    } else {
+      await _launchWindowsUpdater(
+        installerOrZipPath,
+        detachedStarter: detachedStarter,
+        processPid: processPid,
+        tempDirProvider: tempDirProvider,
+      );
+    }
+    if (detachedStarter == null && exitOnComplete) {
+      Timer(const Duration(milliseconds: 350), () => exit(0));
+    }
+    return 'MultiPad güncelleniyor ve yeniden başlatılıyor$shaNote...';
+  }
+
+  static Future<void> _launchWindowsInstaller(
+    String installerPath, {
+    Future<void> Function(String executable, List<String> arguments)?
+        detachedStarter,
+    int? processPid,
+    @visibleForTesting Future<Directory> Function()? tempDirProvider,
+  }) async {
+    final currentPid = processPid ?? pid;
+    final tmpDir = (await (tempDirProvider != null
+            ? tempDirProvider()
+            : getTemporaryDirectory()))
+        .path;
+    final scriptFile = File(p.join(tmpDir, 'multipad_run_installer.ps1'));
+    final psInstaller = _psQuote(installerPath);
+
+    final psScript = '''
+\$ErrorActionPreference = 'SilentlyContinue'
+if ($currentPid -gt 0) {
+  Wait-Process -Id $currentPid -Timeout 15 -ErrorAction SilentlyContinue
+}
+Start-Sleep -Milliseconds 500
+Start-Process -FilePath $psInstaller -ArgumentList '/SILENT', '/CLOSEAPPLICATIONS', '/RESTARTAPPLICATIONS'
+''';
+    await scriptFile.writeAsString(psScript);
+    if (detachedStarter != null) {
+      await detachedStarter('powershell', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        scriptFile.path,
+      ]);
+    } else {
+      await Process.start(
+        'powershell',
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile.path],
+        mode: ProcessStartMode.detached,
+      );
+    }
   }
 
   @visibleForTesting
@@ -306,12 +561,21 @@ class UpdateService {
   static String _psQuote(String value) =>
       "'${value.replaceAll("'", "''")}'";
 
-  static Future<void> _launchWindowsUpdater(String zipPath) async {
+  static Future<void> _launchWindowsUpdater(
+    String zipPath, {
+    Future<void> Function(String executable, List<String> arguments)?
+        detachedStarter,
+    int? processPid,
+    @visibleForTesting Future<Directory> Function()? tempDirProvider,
+  }) async {
     final exeDir = File(Platform.resolvedExecutable).parent.path;
-    final tmpDir = (await getTemporaryDirectory()).path;
+    final tmpDir = (await (tempDirProvider != null
+            ? tempDirProvider()
+            : getTemporaryDirectory()))
+        .path;
     final extractDir = p.join(tmpDir, 'multipad_win_stage');
     final scriptFile = File(p.join(tmpDir, 'multipad_self_update.ps1'));
-    final currentPid = pid;
+    final currentPid = processPid ?? pid;
     final exePath = Platform.resolvedExecutable;
 
     final psExtract = _psQuote(extractDir);
@@ -321,7 +585,9 @@ class UpdateService {
 
     final psScript = '''
 \$ErrorActionPreference = 'Stop'
-Wait-Process -Id $currentPid -Timeout 15 -ErrorAction SilentlyContinue
+if ($currentPid -gt 0) {
+  Wait-Process -Id $currentPid -Timeout 15 -ErrorAction SilentlyContinue
+}
 Start-Sleep -Milliseconds 600
 \$extractDir = $psExtract
 \$zipPath = $psZip
@@ -336,11 +602,21 @@ Copy-Item -Path (Join-Path \$srcRoot '*') -Destination \$exeDir -Recurse -Force
 Start-Process -FilePath \$exePath
 ''';
     await scriptFile.writeAsString(psScript);
-    await Process.start(
-      'powershell',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile.path],
-      mode: ProcessStartMode.detached,
-    );
+    if (detachedStarter != null) {
+      await detachedStarter('powershell', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        scriptFile.path,
+      ]);
+    } else {
+      await Process.start(
+        'powershell',
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile.path],
+        mode: ProcessStartMode.detached,
+      );
+    }
   }
 
   /// Compares semantic version strings e.g. "1.1.0" vs "1.0.4"

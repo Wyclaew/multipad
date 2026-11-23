@@ -30,7 +30,9 @@ class DatabaseService {
     if (!kIsWeb && (Platform.isWindows || Platform.isLinux) ||
         _testDbPathOverride != null) {
       sqfliteFfiInit();
-      databaseFactory = databaseFactoryFfi;
+      databaseFactory = _testDbPathOverride != null
+          ? databaseFactoryFfiNoIsolate
+          : databaseFactoryFfi;
       _ffiInitialized = true;
     }
   }
@@ -61,6 +63,7 @@ class DatabaseService {
     final db = await openDatabase(
       dbPath,
       version: 1,
+      singleInstance: _testDbPathOverride == null,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE vault_items (

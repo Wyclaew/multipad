@@ -1,145 +1,130 @@
-# Project: MultiPad Security & Ergonomics Enhancement
+# Project: MultiPad UI/UX Modernization & Autofill Excellence (v1.4.0)
 
 ## Architecture
-MultiPad is a cross-platform, zero-knowledge password manager built with Flutter (Dart 3.13 / Flutter 3.47), Kotlin (Android platform channels & AutofillService), Swift (macOS runner), and cryptographic primitives (Argon2id, PBKDF2, AES-256-GCM, AES-256-CBC with HMAC-SHA256).
-
-### System Components
+MultiPad is an open-source, zero-knowledge, cross-platform password manager and digital vault for Android, macOS, Windows, Linux, and Web Browsers (Chrome/Firefox/Edge Extension).
+The architecture comprises:
 1. **Core Flutter App (`lib/`)**:
-   - `AuthProvider`: Master key lifecycle, biometric authentication, quick PIN, 2FA interval enforcement, auto-lock suppression.
-   - `VaultProvider`: Item caching, concurrent decryption, offline-first loading, filtering, A-Z sorting, sync reconciliation.
-   - `SettingsProvider`: Auto-lock duration, background lock preferences (desktop vs mobile), 2FA re-prompt days.
-   - `ImportService` & `CryptoService`: Multi-format vault import, format inspection, Bitwarden encrypted JSON decryption (PBKDF2/Argon2 + HKDF-Expand + AES-256-CBC HMAC-SHA256).
-   - `AuditService`: Vault hygiene checks (weak, reused, expired, phishing, compromised credentials) without penalizing absence of 2FA.
-   - `BrowserBridgeService`: Local authenticated loopback HTTP/WebSocket bridge (`127.0.0.1:48292`) connecting desktop browser extensions to the unlocked vault.
-   - `UI Layer`: `AuthScreen` (startup biometric trigger + bottom-right FAB), `HomeScreen` (3-pane Bitwarden-style master-detail, read-only detail pane, quick actions), `CredentialEditorScreen`, `ImportScreen`, `SettingsScreen`.
-2. **Android Platform Subsystem (`android/`)**:
-   - `MultiPadAutofillService`: Autofill credential provider with `SaveInfo` and `onSaveRequest` for capturing new logins and password updates.
-   - `AutofillCryptoStore`: Secure storage bridge for autofill cache and pending save queue.
-   - `MultiPadQuickTileService` & Notification Shortcut: Quick autofill invocation hooks.
-3. **Desktop Browser Extension (`extension/`)**:
-   - Manifest V3 WebExtension for Chrome/Firefox/Edge.
-   - Background service worker communicating with `127.0.0.1:48292` via paired token.
-   - Content scripts detecting login forms, performing autofill, and capturing credential submissions.
-4. **Documentation & Security (`README.md`, `SECURITY_COMPARISON.md`)**:
-   - Polished public English documentation and concise Bitwarden security comparison.
+   - `Theme & UI`: Refined Material 3 color system (slate/indigo tiers), custom component themes, responsive layouts (mobile `NavigationBar` vs desktop 3-pane master-detail), polished cards with micro-interactions, command palette quick launcher.
+   - `Native Bridge & Pending Capture`: Platform channel (`NativeBridgeService`) coordinating between native Android Autofill and the Flutter SQLite vault.
+   - `Browser Bridge (`BrowserBridgeService`)`: Local authenticated loopback HTTP server (`127.0.0.1:48292`) connecting browser extensions to the unlocked vault.
+   - `Settings`: Inset grouped cards including dedicated Browser Extension & Bridge pairing interface (PIN display, copy, regeneration, token revocation).
+2. **Manifest V3 Web Extension (`extension/`)**:
+   - Background service worker communicating with local bridge via paired session token.
+   - Content script (`content.js`): In-field shield badges, floating fixed-position dropdowns, multi-step form detection, reactive framework (React/Vue/Angular) property descriptor injection, automated TOTP copying, interactive save banners.
+   - Modern popup (`popup.html`, `popup.css`, `popup.js`): 380x520px responsive container, SVG icons, inline password generator tab, Copy Username, Reveal Password, live TOTP countdown ticker.
+3. **Android Platform Subsystem (`android/`)**:
+   - `MultiPadAutofillService`: Android 11+ Inline Suggestions (`InlineSuggestionsRequest`, `InlinePresentation`) and custom branded `RemoteViews` dropdowns.
+   - Multi-step context aggregation across `request.fillContexts`, split-field multi-box OTP distribution, browser URL bar fallback domain extraction, and package alias matching.
+   - `SaveInfo` generation and `onSaveRequest` capture pipeline feeding `AutofillCryptoStore`.
 
 ---
 
 ## Feature Inventory
 | # | Feature | Description | Milestone | Source |
 |---|---------|-------------|-----------|--------|
-| 1 | Biometric Auto-Trigger on Startup | Automatically trigger biometric prompt on mobile & macOS upon app launch when biometric unlock is enabled | M1 | R1 |
-| 2 | Circular Biometric Login Button | Render small circular biometric button at bottom-right of login screen for manual biometric invocation | M1 | R1 |
-| 3 | macOS Background Lock Setting | Preference to toggle auto-lock on window minimize/background, defaulting to false on macOS | M1 | R2 |
-| 4 | Android Navigation Auto-Lock Fix | Prevent unexpected auto-lock during settings navigation when timed auto-lock is disabled via lifecycle-aware suppression | M1 | R2 |
-| 5 | Configurable 2FA Re-Prompt Intervals | Support 30, 60, and 90 day intervals for 2FA re-verification when opening the vault | M2 | R2 |
-| 6 | Encrypted Vault Import Support | Detect encrypted export files (Bitwarden encrypted JSON), prompt for password, and decrypt credentials | M2 | R3 |
-| 7 | Security Audit 2FA Recalibration | Calibrate vault audit so absence of 2FA on stored credentials is not penalized or flagged as a vulnerability | M2 | R3 |
-| 8 | Desktop Browser Extension & Bridge | Manifest V3 extension and local authenticated bridge for form detection, autofill, and credential capture | M3 | R4 |
-| 9 | Mobile Autofill Save & Update | Capture new credentials and modified passwords via `SaveInfo` and `onSaveRequest` in `MultiPadAutofillService` | M4 | R4 |
-| 10 | Android Quick Autofill Shortcuts | Quick Settings tile and notification shortcut for immediate autofill access | M4 | R4 |
-| 11 | Bitwarden-Style UX Ergonomics | 3-pane layout, dedicated read-only item detail pane, A-Z sorting, and top-level generator access | M4 | R4 |
-| 12 | Background Footprint Optimization | Lightweight CPU/memory footprint; consolidate per-card TOTP timers into centralized ticker | M5 | R5 |
-| 13 | Fast Startup Loading Acceleration | Parallel local item decryption and offline-first stale-while-revalidate startup flow | M5 | R5 |
-| 14 | Comprehensive English README | Modern, polished English `README.md` for open-source release covering architecture, features, and setup | M5 | R5 |
-| 15 | Bitwarden Security Comparison | Concise, objective security evaluation comparing MultiPad against Bitwarden | M5 | R5 |
-| 16 | Final Integration & E2E Test Suite | 100% pass across E2E test suite (Tiers 1-4) and Tier 5 adversarial hardening | M6 | Acceptance |
+| 1 | Modern Material 3 Theme System | Refined surface tiers (`surfaceContainerLow/High`), subtle outlines (`outlineVariant`), customized component themes, and monospace typography | M1 | Survey UI/UX |
+| 2 | Responsive Mobile Navigation | Replace drawer-only navigation on < 780px screens with modern `NavigationBar` and streamlined top AppBar | M1 | Survey UI/UX |
+| 3 | Polished Vault Item Cards | Subtle borders, hover elevation, compact action rows, unified tag pills, and in-place localized copy micro-interaction | M1 | Survey UI/UX |
+| 4 | Desktop Command Palette Keyboard Nav | Full Arrow Up/Down, Enter, Tab, and Escape navigation in `QuickSearchDialog` with visual shortcut badges | M1 | Survey UI/UX |
+| 5 | Password Generator Dialog Polish | Responsive dialog/sheet, full localization (`context.l10n`), interactive multi-segment entropy gradient meter | M1 | Survey UI/UX |
+| 6 | Desktop Bridge Settings Card | Dedicated section in `SettingsScreen` showing loopback port 48292, active 6-digit PIN with 1-click copy, and PIN rotation | M1 | Survey UI/UX & Web |
+| 7 | Reactive Framework Autofill Injection | Use prototype property descriptors and synthetic input/change/blur events in `content.js` for React, Vue, and Angular forms | M2 | Survey Web |
+| 8 | Multi-Step Login & Standalone Form Detection | Decouple username search from password existence; detect Step 1 identity fields and 2FA/OTP inputs in `content.js` | M2 | Survey Web |
+| 9 | In-Field Badge & Floating Fixed Dropdown | MultiPad shield badge inside input fields (closed Shadow DOM) and viewport-relative fixed dropdown with scroll/resize tracking & keyboard navigation | M2 | Survey Web |
+| 10 | Automated TOTP Auto-Copy & Clipboard | Automatically copy live TOTP token to clipboard upon credential autofill with toast notification (`clipboardWrite` permission) | M2 | Survey Web |
+| 11 | Extension Popup Modernization & Generator | 380x520px container, SVG icons, inline password generator tab, Copy Username, Reveal Password, and live TOTP ticker | M2 | Survey Web & UI/UX |
+| 12 | eTLD+1 Root Domain Matching | Normalize domain matching in `BrowserBridgeService` so subdomains match root credentials | M2 | Survey Web |
+| 13 | Connect Pending Capture Pipeline | Wire `NativeBridgeService.getPendingAutofillCredentials()` on Flutter resume/unlock, show bottom sheet / dialog to update or save into vault | M3 | Survey Android |
+| 14 | Android 11+ Inline Suggestions | Implement `InlineSuggestionsRequest` and `InlinePresentation` for keyboard suggestion chips (Gboard, SwiftKey) | M3 | Survey Android |
+| 15 | Branded Custom RemoteViews Layout | Custom `autofill_dataset_item.xml` layout with MultiPad branding and theme-adaptive colors | M3 | Survey Android |
+| 16 | Multi-Step Context Aggregation | Iterate backwards across `request.fillContexts` so Step 1 username is preserved when Step 2 password is submitted | M3 | Survey Android |
+| 17 | Split-Field Multi-Box OTP Distribution | Distribute 6-digit TOTP character-by-character into individual single-character boxes | M3 | Survey Android |
+| 18 | Browser URL Bar Fallback Domain Extraction | Extract domain from URL bar/omnibox text when `node.webDomain` is null (Firefox, WebViews) | M3 | Survey Android |
+| 19 | SaveInfo Configuration & SPA Flags | Prevent false save prompts on username-only forms; add `FLAG_SAVE_ON_ALL_VIEWS_INVISIBLE` for SPA forms | M3 | Survey Android |
+| 20 | Package Alias Mapping Dictionary | Map known app package names (Uber, Twitter/X, etc.) to domains | M3 | Survey Android |
+| 21 | Version Bump to v1.4.0 & Docs | Synchronize version `1.4.0` across pubspec, constants, bridge, manifest, popup, and README | M4 | Goals |
+| 22 | Full Test & Analyzer Verification | 100% pass across `flutter test`, `flutter test test_e2e/`, and 0 `flutter analyze` issues | M4 | Goals |
+| 23 | GitHub Actions Release Deployment | Git commit, tag `v1.4.0`, and trigger CI/CD release workflow | M4 | Goals |
+| 24 | Desktop Frameless / Modern Window Styling | Frameless window chrome on desktop (macOS: `NSWindow.titleBarStyle = .hidden`, `fullSizeContentView`, traffic lights inset; Windows: custom draggable chrome) | M5 | User Request |
+| 25 | Windows Installer (`MultiPad-Windows-Setup.exe`) | Inno Setup script (`windows/installer/multipad_setup.iss`), Start Menu/Desktop shortcuts, Programs registry, and GitHub Actions `iscc` release build | M5 | User Request |
+| 26 | Seamless In-Place In-App Updates | In-place updates across platforms without manual re-installation (Android FileProvider intent, macOS helper script replacement, Windows setup update) | M5 | User Request |
 
 ---
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
-| M1 | Authentication, Biometrics & Window Lock | R1 (Auto-trigger biometrics, circular button) + R2 (macOS minimize lock preference, Android settings auto-lock fix) | none | PLANNED |
-| M2 | Vault Import Decryption, 2FA Intervals & Audit | R2 (30/60/90 day 2FA intervals) + R3 (Bitwarden encrypted JSON import, audit 2FA penalty removal) | none | PLANNED |
-| M3 | Desktop Browser Extension & Communication Bridge | R4 (Manifest V3 extension, authenticated local HTTP/WebSocket bridge, form detection, autofill & capture) | none | PLANNED |
-| M4 | Mobile Autofill Capture, Shortcuts & UX Ergonomics | R4 (Android Autofill SaveInfo/onSaveRequest, notification shortcut, 3-pane layout, detail pane, A-Z sort, generator) | M1, M2 | PLANNED |
-| M5 | Performance Optimization, Documentation & Security Comparison | R5 (Startup loading acceleration, TOTP timer consolidation, English README, Bitwarden comparison report) | M1, M2, M3, M4 | PLANNED |
-| M6 | Final Verification & Adversarial Hardening | Phase 1: 100% E2E test suite pass (Tiers 1-4). Phase 2: Tier 5 adversarial coverage hardening. | M1, M2, M3, M4, M5, TEST_READY.md | PLANNED |
+| M1 | Flutter UI/UX Modernization & Desktop Bridge UI | Features 1–6 (Theme, mobile navigation, cards, command palette, generator polish, Settings bridge pairing card) | none | DONE |
+| M2 | Web Browser Extension & Desktop Bridge Autofill | Features 7–12 (MV3 manifest, reactive autofill, multi-step detection, in-field badge, floating dropdown, TOTP copy, popup generator, eTLD+1) | M1 (Bridge UI) | DONE |
+| M3 | Android Mobile Autofill Excellence & Capture | Features 13–20 (Capture pipeline connection, inline suggestions, custom RemoteViews, multi-step context, split OTP, URL bar fallback, SaveInfo flags) | M1 (Theme/UI) | DONE |
+| M5 | Desktop Frameless, Windows Installer & In-Place Updates | Features 24–26 (Frameless window styling, Inno Setup Windows installer, and in-place update pipelines across Android/macOS/Windows) | none (independent desktop/infra track) | DONE |
+| M4 | Verification, Version Bump (v1.4.0) & CI/CD Deployment | Features 21–23 (v1.4.0 bump across all files, full test suite pass, analyzer 0 issues, tag, and deployment) | M1, M2, M3, M5 | DONE |
 
 ---
 
 ## Interface Contracts
 
-### 1. `SettingsProvider` ↔ `AuthProvider` (Lock & 2FA)
-- `bool get lockOnBackground`: Defaults to `false` on macOS/desktop platforms, `true` on mobile. Exposes `Future<void> setLockOnBackground(bool value)`.
-- `int get twoFactorRepromptDays`: Returns configured interval (30, 60, or 90 days). Exposes `Future<void> setTwoFactorRepromptDays(int days)`.
-- `bool isTwoFactorPromptDue()`: Returns `true` if `DateTime.now().difference(lastVerified) > Duration(days: repromptDays)`.
-- `void suppressAutoLockUntilResumed()`: Suppresses auto-lock across asynchronous external intent launches until the app transitions through `resumed` lifecycle state with a 500ms debounce.
+### 1. `BrowserBridgeService` ↔ `SettingsScreen` (Bridge Pairing UI)
+- `BrowserBridgeService.instance.pairingCode`: Returns the active 6-digit PIN string (e.g. `"849201"`).
+- `BrowserBridgeService.instance.isPortBound`: Returns boolean whether port 48292 is bound and listening.
+- `BrowserBridgeService.instance.rotatePairingToken()`: Invalidates current token, generates new 6-digit PIN, and notifies listeners.
 
-### 2. `ImportService` ↔ `CryptoService` (Encrypted Import)
-- `bool isEncryptedExport(String rawContent)`: Returns `true` if JSON parses with `"encrypted": true` or `"passwordProtected": true`.
-- `Future<ImportInspectionResult> inspectFile(String path, {String? decryptionPassword})`: If encrypted and password is null, returns status `needsPassword`. If password is provided, decrypts payload and returns parsed items.
-- `Future<String> decryptBitwardenJson(String rawJson, String password)`:
-  - Parses salt, kdfType (PBKDF2/Argon2id), kdfIterations.
-  - Derives 32-byte master key, expands with HKDF-Expand into 32-byte encKey and 32-byte macKey.
-  - Verifies HMAC-SHA256 MAC and decrypts AES-256-CBC ciphertext. Returns cleartext JSON string containing `folders` and `items`.
+### 2. `NativeBridgeService` ↔ `VaultProvider` (Android Autofill Capture)
+- `NativeBridgeService.getPendingAutofillCredentials()`: Returns `List<Map<String, dynamic>>` representing captured credentials `{ "url", "username", "password", "package" }`.
+- `NativeBridgeService.clearPendingAutofillCredentials()`: Flushes the pending SharedPreferences queue.
+- `VaultProvider.processPendingAutofillCapture(...)`: Checks for existing domain/username matches. If matched, updates password; if new, creates a `VaultItem` and persists to SQLite.
 
-### 3. `BrowserBridgeService` ↔ Desktop Extension
-- Endpoint: `http://127.0.0.1:48292/api/v1/...`
-- Headers: `Authorization: Bearer <pairing_token>`, `Origin: chrome-extension://<id>`
-- Routes:
-  - `GET /status`: `{ "status": "unlocked" | "locked", "version": "1.0.0" }`
-  - `POST /query`: Input `{ "url": "https://example.com" }` → Returns list of matched credentials `{ "id", "title", "username", "password", "totp" }`.
-  - `POST /capture`: Input `{ "url", "username", "password" }` → Enqueues or saves new/updated credential into vault.
-  - `POST /pair`: Hands off authorization pairing token upon user confirmation in desktop UI.
-
-### 4. `MultiPadAutofillService` (Android) ↔ Vault Store
-- `SaveInfo`: `SaveInfo.SAVE_DATA_TYPE_PASSWORD | SaveInfo.SAVE_DATA_TYPE_USERNAME` attached to `FillResponse.Builder`.
-- `onSaveRequest(request: SaveRequest, callback: SaveCallback)`:
-  - Traverses `request.fillContexts.last().structure`.
-  - Extracts filled username, password, and package/web domain.
-  - Saves pending captured item into `AutofillCryptoStore.savePendingCredential(...)`.
-  - Notifies user via toast/notification; pending credentials import on next MultiPad vault unlock.
+### 3. `content.js` ↔ `background.js` (Extension Autofill Protocol)
+- `QUERY_CREDENTIALS`: `{ action: 'QUERY_CREDENTIALS', url: window.location.href }` → returns matching credentials with live TOTP.
+- `AUTOFILL_CREDENTIAL`: Injects credentials using prototype property descriptors and synthetic events.
+- `COPY_TO_CLIPBOARD`: Copies live TOTP to clipboard and displays in-page toast notification.
+- `CAPTURE_CREDENTIAL`: `{ action: 'CAPTURE_CREDENTIAL', url, username, password }` → presents confirmation banner before submitting to bridge.
 
 ---
 
 ## Code Layout
 ```
 lib/
-├── constants.dart                     # Storage keys, defaults, endpoints
-├── main.dart                          # App entry point, lifecycle observer, service initializations
+├── constants.dart                     # App version (1.4.0), UI constants, endpoints
+├── main.dart                          # Modernized theme, app lifecycle resume checks
 ├── models/
-│   ├── vault_item.dart                # Credential data model
-│   └── audit_issue.dart               # Security audit issues
+│   └── vault_item.dart                # Credential model
 ├── providers/
-│   ├── auth_provider.dart             # Master key, biometrics, 2FA intervals, lock suppression
-│   ├── settings_provider.dart         # Preferences, lockOnBackground, 2FA intervals
-│   └── vault_provider.dart            # Vault state, caching, A-Z sort, fast parallel decryption
+│   ├── auth_provider.dart             # Authentication & biometrics
+│   ├── settings_provider.dart         # Preferences & autofill sync
+│   └── vault_provider.dart            # Vault state & pending credential capture integration
 ├── services/
-│   ├── audit_service.dart             # Calibrated audit calculations (no 2FA penalty)
-│   ├── biometric_service.dart         # Local_auth biometrics wrapper
-│   ├── browser_bridge_service.dart    # Authenticated loopback HTTP bridge for browser extension
-│   ├── crypto_service.dart            # Argon2id, PBKDF2, AES-GCM, Bitwarden KDF + AES-CBC
-│   ├── import_service.dart            # Import inspection, Bitwarden encrypted JSON decryption
-│   └── totp_ticker_service.dart       # Consolidated 1-second TOTP ticker for low CPU footprint
+│   ├── browser_bridge_service.dart    # Loopback bridge (eTLD+1 matching, pairing PIN)
+│   ├── native_bridge_service.dart     # Android Autofill platform channel bridge
+│   └── totp_service.dart              # TOTP generation & countdown
 ├── screens/
-│   ├── auth_screen.dart               # Startup biometric trigger, bottom-right circular button
-│   ├── home_screen.dart               # 3-pane master-detail layout, A-Z sort, generator access
-│   ├── import_screen.dart             # Encrypted file detection & password prompt dialog
-│   └── settings_screen.dart           # macOS background lock toggle, 2FA interval choices (30/60/90)
-└── widgets/
-    ├── credential_detail_pane.dart    # Dedicated read-only detail view with quick copy
-    ├── password_generator_dialog.dart # Top-level generator access
-    └── vault_item_card.dart           # Lightweight card hooked to centralized TOTP ticker
+│   ├── home_screen.dart               # Responsive navigation (mobile NavigationBar, desktop 3-pane)
+│   ├── settings_screen.dart           # Grouped cards & Browser Extension pairing UI
+│   └── authenticator_screen.dart      # TOTP authenticator with smooth animations
+├── widgets/
+│   ├── quick_search_dialog.dart       # Command palette with full keyboard navigation
+│   ├── password_generator_dialog.dart # Modernized responsive generator with entropy bar
+│   └── vault_item_card.dart           # Polished card with in-place copy micro-interactions
 android/
-└── app/src/main/kotlin/com/multipad/multipad/
-    ├── MultiPadAutofillService.kt     # SaveInfo and onSaveRequest implementation
-    ├── AutofillCryptoStore.kt         # Secure store for autofill data & pending capture queue
-    └── MultiPadQuickTileService.kt    # Android Quick Settings tile
+└── app/src/main/
+    ├── AndroidManifest.xml            # Service declarations
+    ├── res/
+    │   ├── layout/
+    │   │   └── autofill_dataset_item.xml # Custom branded RemoteViews layout
+    │   └── values/strings.xml         # Localized service labels
+    └── kotlin/com/multipad/multipad/
+        ├── MultiPadAutofillService.kt # Inline suggestions, multi-step context, split OTP, URL fallback
+        ├── AutofillCryptoStore.kt     # Secure Keystore credential store
+        └── MainActivity.kt            # Platform channel implementation
 extension/
-├── manifest.json                      # Manifest V3 configuration
-├── background.js                      # Service worker communicating with local bridge
-├── content.js                         # Web login form detection, autofill injection, submit listener
-├── popup.html / popup.js              # Extension status, manual search, pairing UI
+├── manifest.json                      # MV3 permissions (clipboardWrite, contextMenus), v1.4.0
+├── background.js                      # Service worker & bridge gateway
+├── content.js                         # In-field badge, floating fixed dropdown, reactive injection, TOTP
+├── popup.html / popup.js / popup.css  # 380x520px popup, inline generator, live TOTP ticker
 └── icons/                             # Extension icons
 test/
-├── audit_and_totp_test.dart           # Calibrated audit tests (no 2FA penalty)
-├── import_service_test.dart           # Bitwarden plain & encrypted JSON import tests
-├── crypto_service_test.dart           # Bitwarden KDF & AES-256-CBC decryption tests
-├── biometric_and_lock_test.dart       # Startup trigger, circular button & lock suppression tests
-└── browser_bridge_test.dart           # Extension loopback bridge authentication & query tests
-test_e2e/                              # Independent E2E test suite (Tiers 1-4)
-README.md                              # Modern public English documentation
-SECURITY_COMPARISON.md                 # Concise Bitwarden security comparison report
+├── browser_bridge_test.dart           # Bridge pairing & query tests
+├── m4_autofill_and_ux_test.dart       # Capture pipeline & UI unit tests
+test_e2e/                              # Independent E2E test suite
+README.md                              # Public documentation
 ```

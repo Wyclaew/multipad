@@ -52,7 +52,7 @@ void main() {
       expect(res1.statusCode, 200);
       final json1 = jsonDecode(res1.body) as Map<String, dynamic>;
       expect(json1['status'], 'unlocked');
-      expect(json1['version'], '1.3.1');
+      expect(json1['version'], '1.4.0');
 
       // Locked
       unlocked = false;
@@ -674,6 +674,124 @@ void main() {
 
       final res = await http.get(Uri.parse('${bridge.baseUrl}/unsupported_route'));
       expect(res.statusCode, HttpStatus.notFound);
+    });
+  });
+
+  group('BrowserBridgeService eTLD+1 Domain Matching (Feature 12)', () {
+    test('extractETldPlusOne correctly resolves root domains for standard and ccTLD hosts', () {
+      // Standard gTLDs
+      expect(BrowserBridgeService.extractETldPlusOne('github.com'), 'github.com');
+      expect(BrowserBridgeService.extractETldPlusOne('auth.github.com'), 'github.com');
+      expect(BrowserBridgeService.extractETldPlusOne('deep.sub.github.com'), 'github.com');
+      expect(BrowserBridgeService.extractETldPlusOne('https://login.uber.com/path?foo=1'), 'uber.com');
+
+      // Multi-part ccTLDs (.co.uk, .com.tr, .com.au, .co.jp)
+      expect(BrowserBridgeService.extractETldPlusOne('amazon.co.uk'), 'amazon.co.uk');
+      expect(BrowserBridgeService.extractETldPlusOne('login.amazon.co.uk'), 'amazon.co.uk');
+      expect(BrowserBridgeService.extractETldPlusOne('google.com.tr'), 'google.com.tr');
+      expect(BrowserBridgeService.extractETldPlusOne('auth.google.com.tr'), 'google.com.tr');
+      expect(BrowserBridgeService.extractETldPlusOne('maps.google.co.jp'), 'google.co.jp');
+
+      // Multi-tenant developer hosting platforms (PSL Private)
+      expect(BrowserBridgeService.extractETldPlusOne('user1.github.io'), 'user1.github.io');
+      expect(BrowserBridgeService.extractETldPlusOne('api.user1.github.io'), 'user1.github.io');
+      expect(BrowserBridgeService.extractETldPlusOne('my-site.pages.dev'), 'my-site.pages.dev');
+      expect(BrowserBridgeService.extractETldPlusOne('frontend.vercel.app'), 'frontend.vercel.app');
+
+      // Public suffixes themselves return empty string (not an eTLD+1)
+      expect(BrowserBridgeService.extractETldPlusOne('co.uk'), '');
+      expect(BrowserBridgeService.extractETldPlusOne('github.io'), '');
+      expect(BrowserBridgeService.extractETldPlusOne('com'), '');
+
+      // IP addresses & Localhost
+      expect(BrowserBridgeService.extractETldPlusOne('127.0.0.1'), '127.0.0.1');
+      expect(BrowserBridgeService.extractETldPlusOne('192.168.1.1'), '192.168.1.1');
+      expect(BrowserBridgeService.extractETldPlusOne('localhost'), 'localhost');
+    });
+
+    test('isDomainMatch accurately verifies root domains across subdomains', () {
+      // Direct matches and subdomains
+      expect(BrowserBridgeService.isDomainMatch('uber.com', 'uber.com'), isTrue);
+      expect(BrowserBridgeService.isDomainMatch('login.uber.com', 'uber.com'), isTrue);
+      expect(BrowserBridgeService.isDomainMatch('uber.com', 'login.uber.com'), isTrue);
+
+      // Sister subdomains under the same eTLD+1
+      expect(BrowserBridgeService.isDomainMatch('login.uber.com', 'riders.uber.com'), isTrue);
+      expect(BrowserBridgeService.isDomainMatch('auth.github.com', 'api.github.com'), isTrue);
+      expect(BrowserBridgeService.isDomainMatch('accounts.google.com', 'mail.google.com'), isTrue);
+      expect(BrowserBridgeService.isDomainMatch('login.amazon.co.uk', 'pay.amazon.co.uk'), isTrue);
+
+      // Distinct root domains
+      expect(BrowserBridgeService.isDomainMatch('uber.com', 'lyft.com'), isFalse);
+      expect(BrowserBridgeService.isDomainMatch('github.com', 'gitlab.com'), isFalse);
+
+      // Multi-tenant platform isolation (must NEVER match different users)
+      expect(BrowserBridgeService.isDomainMatch('user1.github.io', 'attacker.github.io'), isFalse);
+      expect(BrowserBridgeService.isDomainMatch('site-a.pages.dev', 'site-b.pages.dev'), isFalse);
+      expect(BrowserBridgeService.isDomainMatch('evil.co.uk', 'amazon.co.uk'), isFalse);
+
+      // Phishing domain rejection
+      expect(BrowserBridgeService.isDomainMatch('github.com.attacker.com', 'github.com'), isFalse);
+    });
+
+    test('POST /query matches credentials when visiting sister subdomains and ranks exact matches first', () async {
+      final items = [
+        VaultItem(
+          id: 'sister-sub',
+          type: VaultItemType.credential,
+          title: 'Uber Riders',
+          username: 'rider_alice',
+          password: 'RiderPassword123!',
+          website: 'https://riders.uber.com',
+        ),
+        VaultItem(
+          id: 'exact-sub',
+          type: VaultItemType.credential,
+          title: 'Uber Driver Login',
+          username: 'driver_alice',
+          password: 'DriverPassword123!',
+          website: 'https://login.uber.com',
+        ),
+        VaultItem(
+          id: 'root-sub',
+          type: VaultItemType.credential,
+          title: 'Uber General',
+          username: 'general_alice',
+          password: 'GeneralPassword123!',
+          website: 'https://uber.com',
+        ),
+      ];
+
+      final testBridge = BrowserBridgeService(
+        isUnlocked: () => true,
+        getItems: () => items,
+        initialToken: 'etld-token',
+      );
+      await testBridge.start(port: 0);
+
+      final res = await http.post(
+        Uri.parse('${testBridge.baseUrl}/query'),
+        headers: {
+          'Authorization': 'Bearer etld-token',
+          'Origin': 'chrome-extension://myextension',
+        },
+        body: jsonEncode({'url': 'https://login.uber.com/app'}),
+      );
+
+      expect(res.statusCode, HttpStatus.ok);
+      final json = jsonDecode(res.body) as Map<String, dynamic>;
+      final matches = json['matches'] as List<dynamic>;
+
+      // All 3 items should match because they share the 'uber.com' eTLD+1
+      expect(matches.length, 3);
+      // Exact match (login.uber.com) must be ranked first
+      expect(matches[0]['id'], 'exact-sub');
+      // Root domain match (uber.com) ranked second
+      expect(matches[1]['id'], 'root-sub');
+      // Sister subdomain match (riders.uber.com) ranked third
+      expect(matches[2]['id'], 'sister-sub');
+
+      await testBridge.stop();
     });
   });
 }

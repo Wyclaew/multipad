@@ -47,3 +47,9 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    implementation("androidx.autofill:autofill:1.1.0")
+    testImplementation("junit:junit:4.13.2")
+}
+

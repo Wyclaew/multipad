@@ -137,6 +137,39 @@ void FlutterWindow::SetupNativeMethodChannel() {
         } else if (method == "bringWindowToFront") {
           BringWindowToFront();
           result->Success(flutter::EncodableValue(true));
+        } else if (method == "windowStartDragging") {
+          HWND hwnd = GetHandle();
+          if (hwnd != nullptr) {
+            ::ReleaseCapture();
+            ::SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+          }
+          result->Success(flutter::EncodableValue(true));
+        } else if (method == "windowMinimize") {
+          HWND hwnd = GetHandle();
+          if (hwnd != nullptr) {
+            ::ShowWindow(hwnd, SW_MINIMIZE);
+          }
+          result->Success(flutter::EncodableValue(true));
+        } else if (method == "windowMaximize") {
+          HWND hwnd = GetHandle();
+          if (hwnd != nullptr) {
+            if (::IsZoomed(hwnd)) {
+              ::ShowWindow(hwnd, SW_RESTORE);
+            } else {
+              ::ShowWindow(hwnd, SW_MAXIMIZE);
+            }
+          }
+          result->Success(flutter::EncodableValue(true));
+        } else if (method == "windowClose") {
+          HWND hwnd = GetHandle();
+          if (hwnd != nullptr) {
+            ::PostMessageW(hwnd, WM_CLOSE, 0, 0);
+          }
+          result->Success(flutter::EncodableValue(true));
+        } else if (method == "isWindowMaximized") {
+          HWND hwnd = GetHandle();
+          bool is_max = (hwnd != nullptr) && ::IsZoomed(hwnd);
+          result->Success(flutter::EncodableValue(is_max));
         } else if (method == "setFlagSecure" || method == "setMulticastLock") {
           result->Success(flutter::EncodableValue(true));
         } else {

@@ -139,7 +139,7 @@ jobs:
           path: MultiPad-macOS.dmg
 
   build-windows:
-    name: Build Windows ZIP
+    name: Build Windows (ZIP & Installer)
     needs: quality-gate
     runs-on: windows-latest
     steps:
@@ -172,11 +172,30 @@ jobs:
         run: |
           Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath MultiPad-Windows.zip -Force
 
+      - name: Build Windows Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $rawVer = (Get-Content pubspec.yaml | Select-String '^version:\s*(\S+)').Matches.Groups[1].Value
+          $cleanVer = $rawVer.Split('+')[0]
+          Write-Host "Compiling Inno Setup installer for version: $cleanVer"
+          iscc "/DAppVersion=$cleanVer" windows/installer/multipad_setup.iss
+          if (-not (Test-Path "MultiPad-Windows-Setup.exe")) {
+            Write-Error "Installer MultiPad-Windows-Setup.exe not found at root!"
+            exit 1
+          }
+          Write-Host "Successfully generated MultiPad-Windows-Setup.exe"
+
       - name: Upload Windows ZIP artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-zip
           path: MultiPad-Windows.zip
+
+      - name: Upload Windows Installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: MultiPad-Windows-Setup.exe
 
   release:
     name: Create GitHub Release (Replace Previous)
@@ -207,10 +226,16 @@ jobs:
           name: windows-zip
           path: release-assets
 
+      - name: Download Windows Installer
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: release-assets
+
       - name: Compute SHA256SUMS.txt
         run: |
           cd release-assets
-          sha256sum MultiPad-Android.apk MultiPad-macOS.dmg MultiPad-Windows.zip > SHA256SUMS.txt
+          sha256sum MultiPad-Android.apk MultiPad-macOS.dmg MultiPad-Windows-Setup.exe MultiPad-Windows.zip > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Read Version from pubspec.yaml
@@ -239,6 +264,7 @@ jobs:
           gh release create "$TAG_NAME" \
             release-assets/MultiPad-Android.apk \
             release-assets/MultiPad-macOS.dmg \
+            release-assets/MultiPad-Windows-Setup.exe \
             release-assets/MultiPad-Windows.zip \
             release-assets/SHA256SUMS.txt \
             --title "MultiPad $TAG_NAME" \
@@ -247,7 +273,8 @@ jobs:
           **İndirme Dosyaları:**
           - 📱 **Android:** \`MultiPad-Android.apk\` (Uygulama içi SHA-256 doğrulamalı güncelleme + Android Autofill + FLAG_SECURE)
           - 🍎 **macOS:** \`MultiPad-macOS.dmg\` (MultiPad.app, Touch ID, Menü Çubuğu + \`⌘⇧Space\` Hızlı Arama)
-          - 🪟 **Windows:** \`MultiPad-Windows.zip\` (Sistem Tepsisi, \`Ctrl+Shift+Space\` Hızlı Arama, \`multipad.exe\`)
+          - 🪟 **Windows Kurulum (Önerilen):** \`MultiPad-Windows-Setup.exe\` (Otomatik kurulum, Başlat Menüsü & Masaüstü kısayolları, üzerine temiz güncelleme)
+          - 💼 **Windows Taşınabilir:** \`MultiPad-Windows.zip\` (Sistem Tepsisi, \`Ctrl+Shift+Space\` Hızlı Arama, \`multipad.exe\`)
           - 🔐 **Bütünlük Kontrolü:** \`SHA256SUMS.txt\`
 
           **Öne Çıkan Yenilikler ($TAG_NAME):**

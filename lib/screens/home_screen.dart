@@ -7,6 +7,7 @@ import '../models/vault_item.dart';
 import '../providers/auth_provider.dart';
 import '../providers/vault_provider.dart';
 import '../widgets/credential_detail_pane.dart';
+import '../widgets/password_generator_dialog.dart';
 import '../widgets/quick_search_dialog.dart';
 import '../widgets/vault_item_card.dart';
 import 'audit_screen.dart';
@@ -22,6 +23,7 @@ import 'secret_editor_screen.dart';
 import 'settings_screen.dart';
 import 'trash_screen.dart';
 import 'wifi_editor_screen.dart';
+import '../services/pending_capture_coordinator.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -34,6 +36,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final _searchCtrl = TextEditingController();
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   String? _selectedItemId;
+  int _mobileNavIndex = 0;
 
   @override
   void initState() {
@@ -45,6 +48,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (vault.allItems.isEmpty && !vault.isLoading) {
         vault.loadVault();
       }
+      PendingCaptureCoordinator.checkAndShow(context);
     });
   }
 
@@ -837,6 +841,22 @@ class _HomeScreenState extends State<HomeScreen> {
             );
           },
         ),
+        ListTile(
+          dense: true,
+          leading: const Icon(
+            Icons.password_rounded,
+            size: 19,
+            color: Colors.teal,
+          ),
+          title: Text(l10n.tr('Parola Üretici', 'Password Generator')),
+          onTap: () {
+            final nav = Navigator.of(context);
+            if (closeDrawerOnSelect && nav.canPop()) {
+              nav.pop();
+            }
+            PasswordGeneratorDialog.show(context);
+          },
+        ),
         const Divider(height: 16),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 8, 4),
@@ -917,6 +937,81 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                 ),
+          bottomNavigationBar: isWide
+              ? null
+              : NavigationBar(
+                  selectedIndex: _mobileNavIndex,
+                  onDestinationSelected: (idx) {
+                    setState(() => _mobileNavIndex = idx);
+                    switch (idx) {
+                      case 0:
+                        break;
+                      case 1:
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const AuthenticatorScreen(),
+                          ),
+                        ).then((_) {
+                          if (mounted) setState(() => _mobileNavIndex = 0);
+                        });
+                        break;
+                      case 2:
+                        PasswordGeneratorDialog.show(context).then((_) {
+                          if (mounted) setState(() => _mobileNavIndex = 0);
+                        });
+                        break;
+                      case 3:
+                        Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const AuditScreen()),
+                        ).then((_) {
+                          if (mounted) setState(() => _mobileNavIndex = 0);
+                        });
+                        break;
+                      case 4:
+                        Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                        ).then((_) {
+                          if (mounted) setState(() => _mobileNavIndex = 0);
+                        });
+                        break;
+                    }
+                  },
+                  destinations: [
+                    NavigationDestination(
+                      icon: const Icon(Icons.lock_outline),
+                      selectedIcon: const Icon(Icons.lock),
+                      label: l10n.tr('Kasa', 'Vault'),
+                    ),
+                    NavigationDestination(
+                      icon: const Icon(Icons.phonelink_lock_outlined),
+                      selectedIcon: const Icon(Icons.phonelink_lock_rounded),
+                      label: l10n.tr('2FA', '2FA'),
+                    ),
+                    NavigationDestination(
+                      icon: const Icon(Icons.password_outlined),
+                      selectedIcon: const Icon(Icons.password_rounded),
+                      label: l10n.tr('Üretici', 'Generator'),
+                    ),
+                    NavigationDestination(
+                      icon: Badge(
+                        isLabelVisible: auditReport.issues.isNotEmpty,
+                        label: Text('${auditReport.issues.length}'),
+                        child: const Icon(Icons.shield_outlined),
+                      ),
+                      selectedIcon: Badge(
+                        isLabelVisible: auditReport.issues.isNotEmpty,
+                        label: Text('${auditReport.issues.length}'),
+                        child: const Icon(Icons.shield_rounded),
+                      ),
+                      label: l10n.tr('Denetim', 'Audit'),
+                    ),
+                    NavigationDestination(
+                      icon: const Icon(Icons.settings_outlined),
+                      selectedIcon: const Icon(Icons.settings),
+                      label: l10n.settings,
+                    ),
+                  ],
+                ),
           appBar: vault.isSelectionMode
               ? AppBar(
                   leading: IconButton(
@@ -949,10 +1044,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 )
               : AppBar(
                   title: Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Text(
-                        'MultiPad',
-                        style: TextStyle(fontWeight: FontWeight.bold),
+                      const Flexible(
+                        child: Text(
+                          'MultiPad',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                       if (folderName != null) ...[
                         const SizedBox(width: 8),
@@ -970,15 +1069,16 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
                   actions: [
-                    IconButton(
-                      tooltip: l10n.authenticator,
-                      icon: const Icon(Icons.phonelink_lock_rounded),
-                      onPressed: () => Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => const AuthenticatorScreen(),
+                    if (isWide)
+                      IconButton(
+                        tooltip: l10n.authenticator,
+                        icon: const Icon(Icons.phonelink_lock_rounded),
+                        onPressed: () => Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const AuthenticatorScreen(),
+                          ),
                         ),
                       ),
-                    ),
                     IconButton(
                       tooltip: l10n.tr('Hızlı Arama', 'Quick Search'),
                       icon: const Icon(Icons.bolt_rounded),
@@ -1001,17 +1101,18 @@ class _HomeScreenState extends State<HomeScreen> {
                             : const Icon(Icons.sync_rounded),
                         onPressed: vault.isLoading ? null : vault.loadVault,
                       ),
-                    IconButton(
-                      tooltip: l10n.audit,
-                      icon: Badge(
-                        isLabelVisible: auditReport.issues.isNotEmpty,
-                        label: Text('${auditReport.issues.length}'),
-                        child: const Icon(Icons.shield_outlined),
+                    if (isWide)
+                      IconButton(
+                        tooltip: l10n.audit,
+                        icon: Badge(
+                          isLabelVisible: auditReport.issues.isNotEmpty,
+                          label: Text('${auditReport.issues.length}'),
+                          child: const Icon(Icons.shield_outlined),
+                        ),
+                        onPressed: () => Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const AuditScreen()),
+                        ),
                       ),
-                      onPressed: () => Navigator.of(context).push(
-                        MaterialPageRoute(builder: (_) => const AuditScreen()),
-                      ),
-                    ),
                     PopupMenuButton<String>(
                       onSelected: (value) {
                         switch (value) {
@@ -1226,74 +1327,68 @@ class _HomeScreenState extends State<HomeScreen> {
                                 vault.setCategory(VaultCategoryFilter.cards),
                           ),
                           _CategoryChip(
-                            label: l10n.tr('Banka', 'Bank'),
-                            selected: vault.currentCategory ==
-                                VaultCategoryFilter.bankAccounts,
-                            onTap: () => vault.setCategory(
-                              VaultCategoryFilter.bankAccounts,
-                            ),
-                          ),
-                          _CategoryChip(
-                            label: l10n.tr('Sunucu', 'Server'),
-                            selected: vault.currentCategory ==
-                                VaultCategoryFilter.servers,
-                            onTap: () => vault.setCategory(
-                              VaultCategoryFilter.servers,
-                            ),
-                          ),
-                          _CategoryChip(
-                            label: l10n.tr('Veritabanı', 'Database'),
-                            selected: vault.currentCategory ==
-                                VaultCategoryFilter.databases,
-                            onTap: () => vault.setCategory(
-                              VaultCategoryFilter.databases,
-                            ),
-                          ),
-                          _CategoryChip(
-                            label: l10n.tr('Kripto', 'Crypto'),
-                            selected: vault.currentCategory ==
-                                VaultCategoryFilter.cryptoWallets,
-                            onTap: () => vault.setCategory(
-                              VaultCategoryFilter.cryptoWallets,
-                            ),
-                          ),
-                          _CategoryChip(
-                            label: l10n.catWifi,
-                            selected:
-                                vault.currentCategory == VaultCategoryFilter.wifi,
-                            onTap: () =>
-                                vault.setCategory(VaultCategoryFilter.wifi),
-                          ),
-                          _CategoryChip(
-                            label: l10n.catIdentity,
-                            selected: vault.currentCategory ==
-                                VaultCategoryFilter.identity,
-                            onTap: () => vault.setCategory(
-                              VaultCategoryFilter.identity,
-                            ),
-                          ),
-                          _CategoryChip(
-                            label: l10n.catLicense,
-                            selected: vault.currentCategory ==
-                                VaultCategoryFilter.license,
-                            onTap: () => vault.setCategory(
-                              VaultCategoryFilter.license,
-                            ),
-                          ),
-                          _CategoryChip(
-                            label: l10n.catSecrets,
-                            selected: vault.currentCategory ==
-                                VaultCategoryFilter.secrets,
-                            onTap: () => vault.setCategory(
-                              VaultCategoryFilter.secrets,
-                            ),
-                          ),
-                          _CategoryChip(
                             label: l10n.catFavorites,
                             selected: vault.currentCategory ==
                                 VaultCategoryFilter.favorites,
                             onTap: () => vault.setCategory(
                               VaultCategoryFilter.favorites,
+                            ),
+                          ),
+                          // If an extra secondary category is selected, render it here as active
+                          if (vault.currentCategory != VaultCategoryFilter.all &&
+                              vault.currentCategory != VaultCategoryFilter.credentials &&
+                              vault.currentCategory != VaultCategoryFilter.notes &&
+                              vault.currentCategory != VaultCategoryFilter.cards &&
+                              vault.currentCategory != VaultCategoryFilter.favorites)
+                            _CategoryChip(
+                              label: _labelForCategory(vault.currentCategory, l10n),
+                              selected: true,
+                              onTap: () {},
+                            ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            child: PopupMenuButton<VaultCategoryFilter>(
+                              tooltip: l10n.tr('Diğer Kategoriler', 'More Categories'),
+                              initialValue: vault.currentCategory,
+                              onSelected: (cat) => vault.setCategory(cat),
+                              child: Chip(
+                                avatar: const Icon(Icons.more_horiz, size: 16),
+                                label: Text(l10n.tr('Diğer', 'More')),
+                              ),
+                              itemBuilder: (ctx) => [
+                                PopupMenuItem(
+                                  value: VaultCategoryFilter.bankAccounts,
+                                  child: Text(l10n.tr('Banka Hesapları', 'Bank Accounts')),
+                                ),
+                                PopupMenuItem(
+                                  value: VaultCategoryFilter.servers,
+                                  child: Text(l10n.tr('Sunucular & SSH', 'Servers & SSH')),
+                                ),
+                                PopupMenuItem(
+                                  value: VaultCategoryFilter.databases,
+                                  child: Text(l10n.tr('Veritabanları', 'Databases')),
+                                ),
+                                PopupMenuItem(
+                                  value: VaultCategoryFilter.cryptoWallets,
+                                  child: Text(l10n.tr('Kripto Cüzdanlar', 'Crypto Wallets')),
+                                ),
+                                PopupMenuItem(
+                                  value: VaultCategoryFilter.wifi,
+                                  child: Text(l10n.catWifi),
+                                ),
+                                PopupMenuItem(
+                                  value: VaultCategoryFilter.identity,
+                                  child: Text(l10n.catIdentity),
+                                ),
+                                PopupMenuItem(
+                                  value: VaultCategoryFilter.license,
+                                  child: Text(l10n.catLicense),
+                                ),
+                                PopupMenuItem(
+                                  value: VaultCategoryFilter.secrets,
+                                  child: Text(l10n.catSecrets),
+                                ),
+                              ],
                             ),
                           ),
                         ],
@@ -1443,6 +1538,31 @@ class _HomeScreenState extends State<HomeScreen> {
         );
       },
     );
+  }
+
+  String _labelForCategory(VaultCategoryFilter cat, AppLocalizations l10n) {
+    switch (cat) {
+      case VaultCategoryFilter.bankAccounts:
+        return l10n.tr('Banka', 'Bank');
+      case VaultCategoryFilter.servers:
+        return l10n.tr('Sunucu', 'Server');
+      case VaultCategoryFilter.databases:
+        return l10n.tr('Veritabanı', 'Database');
+      case VaultCategoryFilter.cryptoWallets:
+        return l10n.tr('Kripto', 'Crypto');
+      case VaultCategoryFilter.wifi:
+        return l10n.catWifi;
+      case VaultCategoryFilter.identity:
+        return l10n.catIdentity;
+      case VaultCategoryFilter.license:
+        return l10n.catLicense;
+      case VaultCategoryFilter.secrets:
+        return l10n.catSecrets;
+      case VaultCategoryFilter.trash:
+        return l10n.trash;
+      default:
+        return l10n.catAll;
+    }
   }
 }
 

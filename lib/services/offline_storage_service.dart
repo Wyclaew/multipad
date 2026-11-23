@@ -1,10 +1,16 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 import 'database_service.dart';
 
 class OfflineStorageService {
   // Asynchronous queue lock to serialize read-modify-write operations cleanly
   static Future<void> _lock = Future.value();
+
+  @visibleForTesting
+  static void resetLockForTesting() {
+    _lock = Future.value();
+  }
 
   static Future<T> _sync<T>(Future<T> Function() computation) {
     final completer = Completer<T>();

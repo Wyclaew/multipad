@@ -13,6 +13,7 @@ import '../models/sync_conflict.dart';
 import '../models/vault_folder.dart';
 import '../models/vault_item.dart';
 import '../services/audit_service.dart';
+import '../services/browser_bridge_service.dart';
 import '../services/crypto_service.dart';
 import '../services/native_bridge_service.dart';
 import '../services/offline_storage_service.dart';
@@ -295,9 +296,12 @@ class VaultProvider with ChangeNotifier {
   @visibleForTesting
   void setItemsForTesting(List<VaultItem> items) {
     _items = List.from(items);
+    _isLoading = false;
+    _isSyncingVault = false;
     invalidateAuditReport();
     notifyListeners();
   }
+
 
   bool _listEquals(List<int> a, List<int> b) {
     if (a.length != b.length) return false;
@@ -1186,6 +1190,117 @@ class VaultProvider with ChangeNotifier {
     await _persistItemEncrypted(itemToSave);
     await syncAutofillIndex(_autofillEnabled);
   }
+
+  /// Feature 13: Finds an existing credential matching captured domain / package and username.
+  VaultItem? findMatchingCredential({
+    required String website,
+    required String username,
+    String? packageName,
+  }) {
+    final cleanUsername = username.trim().toLowerCase();
+    final cleanWebsite = website.trim().toLowerCase();
+    final cleanPackage = packageName?.trim().toLowerCase();
+
+    for (final item in items) {
+      if (item.type != VaultItemType.credential) continue;
+      if (item.username.trim().toLowerCase() != cleanUsername) continue;
+
+      // 1. Direct website / domain matching (exact, subdomain, eTLD+1)
+      if (cleanWebsite.isNotEmpty && item.website.isNotEmpty) {
+        if (BrowserBridgeService.isDomainMatch(cleanWebsite, item.website)) {
+          return item;
+        }
+      }
+
+      // 2. Package name matching in custom fields or website field
+      if (cleanPackage != null && cleanPackage.isNotEmpty) {
+        if (item.website.toLowerCase() == cleanPackage) {
+          return item;
+        }
+        final hasMatchingCustomField = item.customFields.any(
+          (field) => field.value.trim().toLowerCase() == cleanPackage,
+        );
+        if (hasMatchingCustomField) {
+          return item;
+        }
+      }
+
+      // 3. Fallback: If both website and item.website are identical strings
+      if (cleanWebsite.isNotEmpty && item.website.trim().toLowerCase() == cleanWebsite) {
+        return item;
+      }
+    }
+    return null;
+  }
+
+  /// Feature 13: Processes captured autofill credentials from native layer.
+  /// If [updateExisting] is true and [existingItem] is provided, updates its password and records history.
+  /// Otherwise, creates and saves a new credential VaultItem.
+  Future<VaultItem> processPendingAutofillCapture({
+    required Map<String, dynamic> captured,
+    bool updateExisting = false,
+    VaultItem? existingItem,
+    String? customTitle,
+  }) async {
+    final capturedUsername = (captured['username'] as String? ?? '').trim();
+    final capturedPassword = (captured['password'] as String? ?? '').trim();
+    final capturedWebsite = (captured['website'] as String? ?? '').trim();
+    final capturedPackage = (captured['packageName'] as String? ?? '').trim();
+    final capturedTitle = (captured['title'] as String? ?? '').trim();
+
+    if (updateExisting && existingItem != null) {
+      final updatedHistory = List<String>.from(existingItem.passwordHistory);
+      if (existingItem.password.isNotEmpty && existingItem.password != capturedPassword) {
+        updatedHistory.insert(0, existingItem.password);
+        if (updatedHistory.length > 10) {
+          updatedHistory.removeLast();
+        }
+      }
+
+      final updatedItem = existingItem.copyWith(
+        title: (customTitle != null && customTitle.trim().isNotEmpty)
+            ? customTitle.trim()
+            : existingItem.title,
+        password: capturedPassword.isNotEmpty ? capturedPassword : existingItem.password,
+        passwordHistory: updatedHistory,
+        passwordLastModified: DateTime.now().toUtc(),
+      );
+
+      await saveItem(updatedItem);
+      return updatedItem;
+    } else {
+      final title = (customTitle != null && customTitle.trim().isNotEmpty)
+          ? customTitle.trim()
+          : (capturedTitle.isNotEmpty
+              ? capturedTitle
+              : (capturedWebsite.isNotEmpty ? capturedWebsite : 'New Login'));
+
+      final customFields = <CustomField>[];
+      if (capturedPackage.isNotEmpty) {
+        customFields.add(CustomField(
+          id: _uuid.v4(),
+          label: 'Package',
+          value: capturedPackage,
+          type: CustomFieldType.text,
+        ));
+      }
+
+      final newItem = VaultItem(
+        id: _uuid.v4(),
+        type: VaultItemType.credential,
+        title: title,
+        username: capturedUsername,
+        password: capturedPassword,
+        website: capturedWebsite,
+        customFields: customFields,
+        passwordLastModified: DateTime.now().toUtc(),
+      );
+
+      await saveItem(newItem);
+      return newItem;
+    }
+  }
+
 
   /// Folders CRUD (stored as VaultItemType.folder)
   Future<VaultFolder> createFolder({

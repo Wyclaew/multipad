@@ -53,7 +53,33 @@ class EFFWordlist {
 }
 
 class PasswordGeneratorDialog extends StatefulWidget {
-  const PasswordGeneratorDialog({super.key});
+  final bool isBottomSheet;
+
+  const PasswordGeneratorDialog({
+    super.key,
+    this.isBottomSheet = false,
+  });
+
+  static Future<String?> show(BuildContext context) {
+    final isMobile = MediaQuery.sizeOf(context).width < 600;
+    if (isMobile) {
+      return showModalBottomSheet<String>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: Theme.of(context).colorScheme.surface,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (ctx) => const PasswordGeneratorDialog(isBottomSheet: true),
+      );
+    } else {
+      return showDialog<String>(
+        context: context,
+        builder: (ctx) => const PasswordGeneratorDialog(isBottomSheet: false),
+      );
+    }
+  }
 
   static final List<GeneratedPasswordRecord> history = [];
   static const int maxHistorySize = 50;
@@ -70,11 +96,13 @@ class PasswordGeneratorDialog extends StatefulWidget {
   }
 
   @override
-  State<PasswordGeneratorDialog> createState() => _PasswordGeneratorDialogState();
+  State<PasswordGeneratorDialog> createState() =>
+      _PasswordGeneratorDialogState();
 }
 
 class _PasswordGeneratorDialogState extends State<PasswordGeneratorDialog> {
   GeneratorMode _mode = GeneratorMode.password;
+  bool _showEntropyDetails = false;
 
   // Password options
   int _length = 24; // Up to 256 characters
@@ -224,405 +252,600 @@ class _PasswordGeneratorDialogState extends State<PasswordGeneratorDialog> {
     return Colors.green;
   }
 
-  String _getEntropyLevel() {
-    if (_entropyBits < 45) return "Zayıf";
-    if (_entropyBits < 65) return "Orta";
-    if (_entropyBits < 90) return "Çok Güçlü";
-    return "Kırılamaz (Askeri Düzey)";
+  String _getEntropyLevel(AppLocalizations l10n) {
+    if (_entropyBits < 45) return l10n.tr("Zayıf", "Weak");
+    if (_entropyBits < 65) return l10n.tr("Orta", "Fair");
+    if (_entropyBits < 90) return l10n.tr("Güçlü", "Strong");
+    return l10n.tr("Çok Güçlü (Askeri Düzey)", "Very Strong (Military-Grade)");
+  }
+
+  String _getCrackTimeEstimate(AppLocalizations l10n) {
+    if (_entropyBits < 45) {
+      return l10n.tr("Saniyeler içinde kırılabilir", "Can be cracked in seconds");
+    }
+    if (_entropyBits < 65) {
+      return l10n.tr("Birkaç gün içinde kırılabilir", "Can be cracked in days to months");
+    }
+    if (_entropyBits < 90) {
+      return l10n.tr("Kırılması binlerce yıl sürer", "Takes thousands of years to crack");
+    }
+    return l10n.tr(
+      "Süper bilgisayarlarla bile trilyonlarca yıl",
+      "Trillions of years with supercomputers",
+    );
+  }
+
+  Widget _buildInteractiveEntropyMeter(
+    ThemeData theme,
+    AppLocalizations l10n,
+    Color activeColor,
+  ) {
+    int activeSegments;
+    if (_entropyBits < 45) {
+      activeSegments = 1;
+    } else if (_entropyBits < 65) {
+      activeSegments = 2;
+    } else if (_entropyBits < 90) {
+      activeSegments = 3;
+    } else {
+      activeSegments = 4;
+    }
+
+    final segmentColors = [
+      Colors.redAccent,
+      Colors.orangeAccent,
+      Colors.blueAccent,
+      Colors.green,
+    ];
+
+    return InkWell(
+      onTap: () {
+        setState(() {
+          _showEntropyDetails = !_showEntropyDetails;
+        });
+      },
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                for (int i = 0; i < 4; i++) ...[
+                  if (i > 0) const SizedBox(width: 4),
+                  Expanded(
+                    child: Container(
+                      height: 6,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(3),
+                        color: i < activeSegments
+                            ? segmentColors[activeSegments - 1]
+                            : theme.colorScheme.outlineVariant.withValues(alpha: 0.35),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Icon(
+                  activeSegments == 4
+                      ? Icons.verified_user_rounded
+                      : Icons.shield_rounded,
+                  size: 14,
+                  color: activeColor,
+                ),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    "${_getEntropyLevel(l10n)} • ${_entropyBits.toStringAsFixed(1)} bit",
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: activeColor,
+                    ),
+                  ),
+                ),
+                Text(
+                  _showEntropyDetails
+                      ? l10n.tr("Gizle ▲", "Hide ▲")
+                      : l10n.tr("Tahmin ▼", "Estimate ▼"),
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.colorScheme.outline,
+                    fontSize: 10,
+                  ),
+                ),
+              ],
+            ),
+            if (_showEntropyDetails) ...[
+              const SizedBox(height: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: activeColor.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(
+                    color: activeColor.withValues(alpha: 0.3),
+                    width: 1,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.timer_outlined, size: 14, color: activeColor),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        _getCrackTimeEstimate(l10n),
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: theme.colorScheme.onSurface,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
     final color = _getEntropyColor();
-    final level = _getEntropyLevel();
 
-    return AlertDialog(
-      title: const Row(
-        children: [
-          Icon(Icons.shield_outlined, color: Colors.blueAccent),
-          SizedBox(width: 8),
-          Expanded(
-            child: Text(
+    final header = Row(
+      children: [
+        const Icon(Icons.shield_outlined, color: Colors.blueAccent),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            l10n.tr(
               "Güvenli Şifre Motoru (EFF Diceware)",
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              "Secure Password Engine (EFF Diceware)",
             ),
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
           ),
+        ),
+        if (widget.isBottomSheet)
+          IconButton(
+            icon: const Icon(Icons.close),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+      ],
+    );
+
+    final contentBody = SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Segmented mode selector
+          SegmentedButton<GeneratorMode>(
+            segments: [
+              ButtonSegment(
+                value: GeneratorMode.password,
+                label: Text(l10n.tr("Karakter Şifre", "Password")),
+              ),
+              ButtonSegment(
+                value: GeneratorMode.passphrase,
+                label: Text(l10n.tr("EFF Diceware", "Passphrase")),
+              ),
+              ButtonSegment(
+                value: GeneratorMode.history,
+                label: Text(
+                  "${l10n.tr('Geçmiş', 'History')} (${PasswordGeneratorDialog.history.length})",
+                ),
+              ),
+            ],
+            selected: {_mode},
+            onSelectionChanged: (val) {
+              setState(() {
+                _mode = val.first;
+                if (_mode != GeneratorMode.history && _generated.isEmpty) {
+                  _generate();
+                }
+              });
+            },
+          ),
+          const SizedBox(height: 16),
+
+          // Generated result display box (for password and passphrase modes)
+          if (_mode != GeneratorMode.history) ...[
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: color.withValues(alpha: 0.6), width: 1.5),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: SelectableText(
+                          _generated,
+                          style: const TextStyle(
+                            fontFamily: "monospace",
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1.2,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.refresh_rounded, size: 20),
+                        tooltip: l10n.tr("Yeniden Üret", "Regenerate"),
+                        onPressed: _generate,
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  _buildInteractiveEntropyMeter(theme, l10n, color),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
+
+          if (_mode == GeneratorMode.password) ...[
+            // Password length slider (up to 256)
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(l10n.tr("Karakter Uzunluğu:", "Character Length:")),
+                Text("$_length", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              ],
+            ),
+            Slider(
+              value: _length.toDouble(),
+              min: 8,
+              max: 256,
+              divisions: 248,
+              label: "$_length",
+              onChanged: (val) {
+                setState(() {
+                  _length = val.round();
+                  _generate();
+                });
+              },
+            ),
+            SwitchListTile(
+              title: Text(l10n.tr("Büyük Harfler (A-Z)", "Uppercase Letters (A-Z)")),
+              value: _includeUpper,
+              dense: true,
+              onChanged: (val) {
+                setState(() {
+                  _includeUpper = val;
+                  _generate();
+                });
+              },
+            ),
+            SwitchListTile(
+              title: Text(l10n.tr("Küçük Harfler (a-z)", "Lowercase Letters (a-z)")),
+              value: _includeLower,
+              dense: true,
+              onChanged: (val) {
+                setState(() {
+                  _includeLower = val;
+                  _generate();
+                });
+              },
+            ),
+            SwitchListTile(
+              title: Text(l10n.tr("Rakamlar (0-9)", "Numbers (0-9)")),
+              value: _includeNumbers,
+              dense: true,
+              onChanged: (val) {
+                setState(() {
+                  _includeNumbers = val;
+                  _generate();
+                });
+              },
+            ),
+            SwitchListTile(
+              title: Text(l10n.tr("Semboller (!@#\$%^&*)", "Symbols (!@#\$%^&*)")),
+              value: _includeSymbols,
+              dense: true,
+              onChanged: (val) {
+                setState(() {
+                  _includeSymbols = val;
+                  _generate();
+                });
+              },
+            ),
+            SwitchListTile(
+              title: Text(l10n.tr("Karışık Karakterleri Hariç Tut (0, O, l, 1, I)", "Exclude Ambiguous (0, O, l, 1, I)")),
+              value: _avoidAmbiguous,
+              dense: true,
+              onChanged: (val) {
+                setState(() {
+                  _avoidAmbiguous = val;
+                  _generate();
+                });
+              },
+            ),
+          ] else if (_mode == GeneratorMode.passphrase) ...[
+            // Passphrase options (EFF Diceware)
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(l10n.tr("Kelime Sayısı (EFF Diceware):", "Word Count (EFF Diceware):")),
+                Text("$_wordCount", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              ],
+            ),
+            Slider(
+              value: _wordCount.toDouble(),
+              min: 3,
+              max: 12,
+              divisions: 9,
+              label: "$_wordCount",
+              onChanged: (val) {
+                setState(() {
+                  _wordCount = val.round();
+                  _generate();
+                });
+              },
+            ),
+            SwitchListTile(
+              title: Text(l10n.tr("İlk Harfleri Büyüt (TitleCase)", "Capitalize (TitleCase)")),
+              value: _capitalize,
+              dense: true,
+              onChanged: (val) {
+                setState(() {
+                  _capitalize = val;
+                  _generate();
+                });
+              },
+            ),
+            SwitchListTile(
+              title: Text(l10n.tr("Rakam Ekle (+6.6 bit Entropi)", "Add Number (+6.6 bit Entropy)")),
+              value: _includeNumberInPassphrase,
+              dense: true,
+              onChanged: (val) {
+                setState(() {
+                  _includeNumberInPassphrase = val;
+                  _generate();
+                });
+              },
+            ),
+            ListTile(
+              title: Text(l10n.tr("Kelime Ayırıcı:", "Word Separator:")),
+              trailing: DropdownButton<String>(
+                value: _separator,
+                underline: const SizedBox(),
+                items: [
+                  DropdownMenuItem(value: "-", child: Text(l10n.tr("Tire (-)", "Hyphen (-)"))),
+                  DropdownMenuItem(value: "_", child: Text(l10n.tr("Alt Çizgi (_)", "Underscore (_)"))),
+                  DropdownMenuItem(value: ".", child: Text(l10n.tr("Nokta (.)", "Dot (.)"))),
+                  DropdownMenuItem(value: " ", child: Text(l10n.tr("Boşluk ( )", "Space ( )"))),
+                  DropdownMenuItem(value: "#", child: Text(l10n.tr("Kare (#)", "Hash (#)"))),
+                  DropdownMenuItem(value: "/", child: Text(l10n.tr("Bölü (/)", "Slash (/)"))),
+                ],
+                onChanged: (val) {
+                  if (val != null) {
+                    setState(() {
+                      _separator = val;
+                      _generate();
+                    });
+                  }
+                },
+              ),
+            ),
+          ] else ...[
+            // History Ring Buffer View (last 50 generations)
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Text(
+                    l10n.tr(
+                      "Son Üretilen Şifreler (${PasswordGeneratorDialog.history.length}/${PasswordGeneratorDialog.maxHistorySize})",
+                      "Recent Passwords (${PasswordGeneratorDialog.history.length}/${PasswordGeneratorDialog.maxHistorySize})",
+                    ),
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                if (PasswordGeneratorDialog.history.isNotEmpty)
+                  TextButton.icon(
+                    icon: const Icon(Icons.delete_sweep_outlined, size: 16),
+                    label: Text(l10n.tr("Temizle", "Clear")),
+                    onPressed: () {
+                      setState(() {
+                        PasswordGeneratorDialog.clearHistory();
+                      });
+                    },
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (PasswordGeneratorDialog.history.isEmpty)
+              Container(
+                padding: const EdgeInsets.all(24),
+                alignment: Alignment.center,
+                child: Text(
+                  l10n.tr("Henüz kaydedilmiş üretim geçmişi yok.", "No generation history saved yet."),
+                  style: TextStyle(color: theme.colorScheme.outline),
+                ),
+              )
+            else
+              SizedBox(
+                height: 280,
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: PasswordGeneratorDialog.history.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (ctx, idx) {
+                    final record = PasswordGeneratorDialog.history[idx];
+                    return ListTile(
+                      dense: true,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                      title: SelectableText(
+                        record.password,
+                        style: const TextStyle(
+                          fontFamily: "monospace",
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                        ),
+                      ),
+                      subtitle: Text(
+                        "${record.mode == "passphrase" ? "Diceware" : l10n.tr("Karakter", "Character")} • ${record.entropyBits.toStringAsFixed(1)} bit",
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.copy, size: 16),
+                            tooltip: l10n.copy,
+                            onPressed: () async {
+                              int timeout = ClipboardService.defaultTimeoutSeconds;
+                              try {
+                                timeout = context.read<SettingsProvider>().clipboardTimeoutSeconds;
+                              } catch (_) {}
+                              await ClipboardService.copySecurely(
+                                record.password,
+                                timeoutSeconds: timeout,
+                              );
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      l10n.tr("Geçmişteki şifre kopyalandı!", "History password copied!"),
+                                    ),
+                                  ),
+                                );
+                              }
+                            },
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.check_circle_outline, size: 18),
+                            tooltip: l10n.tr("Seç", "Select"),
+                            onPressed: () {
+                              setState(() {
+                                _generated = record.password;
+                                _entropyBits = record.entropyBits;
+                                _mode = record.mode == "passphrase" ? GeneratorMode.passphrase : GeneratorMode.password;
+                              });
+                            },
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+          ],
         ],
       ),
-      content: SizedBox(
-        width: 520,
-        child: SingleChildScrollView(
+    );
+
+    final actionsRow = [
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: Text(l10n.cancel),
+      ),
+      OutlinedButton.icon(
+        icon: const Icon(Icons.copy, size: 16),
+        label: Text(l10n.copy),
+        onPressed: () async {
+          if (_generated.isNotEmpty) {
+            int timeout = ClipboardService.defaultTimeoutSeconds;
+            try {
+              timeout = context.read<SettingsProvider>().clipboardTimeoutSeconds;
+            } catch (_) {}
+            await ClipboardService.copySecurely(
+              _generated,
+              timeoutSeconds: timeout,
+            );
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    l10n.copiedWithTimeout(
+                      l10n.tr("Şifre", "Password"),
+                      timeout,
+                    ),
+                  ),
+                ),
+              );
+            }
+          }
+        },
+      ),
+      FilledButton.icon(
+        icon: const Icon(Icons.check, size: 18),
+        label: Text(l10n.tr("Kullan", "Use Password")),
+        onPressed: () => Navigator.of(context).pop(_generated),
+      ),
+    ];
+
+    if (widget.isBottomSheet) {
+      return SafeArea(
+        child: Padding(
+          padding: EdgeInsets.only(
+            left: 16,
+            right: 16,
+            top: 8,
+            bottom: MediaQuery.viewInsetsOf(context).bottom + 16,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Segmented mode selector
-              SegmentedButton<GeneratorMode>(
-                segments: [
-                  const ButtonSegment(
-                    value: GeneratorMode.password,
-                    label: Text("Karakter Şifre"),
-                  ),
-                  const ButtonSegment(
-                    value: GeneratorMode.passphrase,
-                    label: Text("EFF Diceware"),
-                  ),
-                  ButtonSegment(
-                    value: GeneratorMode.history,
-                    label: Text("Geçmiş (${PasswordGeneratorDialog.history.length})"),
-                  ),
-                ],
-                selected: {_mode},
-                onSelectionChanged: (val) {
-                  setState(() {
-                    _mode = val.first;
-                    if (_mode != GeneratorMode.history && _generated.isEmpty) {
-                      _generate();
-                    }
-                  });
-                },
-              ),
-              const SizedBox(height: 16),
-
-              // Generated result display box (for password and passphrase modes)
-              if (_mode != GeneratorMode.history) ...[
-                Container(
-                  padding: const EdgeInsets.all(14),
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 12),
                   decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: color.withValues(alpha: 0.6), width: 1.5),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      SelectableText(
-                        _generated,
-                        style: const TextStyle(
-                          fontFamily: "monospace",
-                          fontSize: 15,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 1.2,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Container(
-                            width: 10,
-                            height: 10,
-                            decoration: BoxDecoration(shape: BoxShape.circle, color: color),
-                          ),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              "$level (${_entropyBits.toStringAsFixed(1)} bit entropi)",
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
-                                color: color,
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.refresh_rounded, size: 20),
-                            tooltip: "Yeniden Üret",
-                            onPressed: _generate,
-                            visualDensity: VisualDensity.compact,
-                          ),
-                        ],
-                      ),
-                    ],
+                    color: theme.colorScheme.outlineVariant,
+                    borderRadius: BorderRadius.circular(2),
                   ),
                 ),
-                const SizedBox(height: 16),
-              ],
-
-              if (_mode == GeneratorMode.password) ...[
-                // Password length slider (up to 256)
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text("Karakter Uzunluğu:"),
-                    Text("$_length", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                  ],
-                ),
-                Slider(
-                  value: _length.toDouble(),
-                  min: 8,
-                  max: 256,
-                  divisions: 248,
-                  label: "$_length",
-                  onChanged: (val) {
-                    setState(() {
-                      _length = val.round();
-                      _generate();
-                    });
-                  },
-                ),
-                SwitchListTile(
-                  title: const Text("Büyük Harfler (A-Z)"),
-                  value: _includeUpper,
-                  dense: true,
-                  onChanged: (val) {
-                    setState(() {
-                      _includeUpper = val;
-                      _generate();
-                    });
-                  },
-                ),
-                SwitchListTile(
-                  title: const Text("Küçük Harfler (a-z)"),
-                  value: _includeLower,
-                  dense: true,
-                  onChanged: (val) {
-                    setState(() {
-                      _includeLower = val;
-                      _generate();
-                    });
-                  },
-                ),
-                SwitchListTile(
-                  title: const Text("Rakamlar (0-9)"),
-                  value: _includeNumbers,
-                  dense: true,
-                  onChanged: (val) {
-                    setState(() {
-                      _includeNumbers = val;
-                      _generate();
-                    });
-                  },
-                ),
-                SwitchListTile(
-                  title: const Text("Semboller (!@#\$%^&*)"),
-                  value: _includeSymbols,
-                  dense: true,
-                  onChanged: (val) {
-                    setState(() {
-                      _includeSymbols = val;
-                      _generate();
-                    });
-                  },
-                ),
-                SwitchListTile(
-                  title: const Text("Karışık Karakterleri Hariç Tut (0, O, l, 1, I)"),
-                  value: _avoidAmbiguous,
-                  dense: true,
-                  onChanged: (val) {
-                    setState(() {
-                      _avoidAmbiguous = val;
-                      _generate();
-                    });
-                  },
-                ),
-              ] else if (_mode == GeneratorMode.passphrase) ...[
-                // Passphrase options (EFF Diceware)
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text("Kelime Sayısı (EFF Diceware):"),
-                    Text("$_wordCount", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                  ],
-                ),
-                Slider(
-                  value: _wordCount.toDouble(),
-                  min: 3,
-                  max: 12,
-                  divisions: 9,
-                  label: "$_wordCount",
-                  onChanged: (val) {
-                    setState(() {
-                      _wordCount = val.round();
-                      _generate();
-                    });
-                  },
-                ),
-                SwitchListTile(
-                  title: const Text("İlk Harfleri Büyüt (TitleCase)"),
-                  value: _capitalize,
-                  dense: true,
-                  onChanged: (val) {
-                    setState(() {
-                      _capitalize = val;
-                      _generate();
-                    });
-                  },
-                ),
-                SwitchListTile(
-                  title: const Text("Rakam Ekle (+6.6 bit Entropi)"),
-                  value: _includeNumberInPassphrase,
-                  dense: true,
-                  onChanged: (val) {
-                    setState(() {
-                      _includeNumberInPassphrase = val;
-                      _generate();
-                    });
-                  },
-                ),
-                ListTile(
-                  title: const Text("Kelime Ayırıcı:"),
-                  trailing: DropdownButton<String>(
-                    value: _separator,
-                    underline: const SizedBox(),
-                    items: const [
-                      DropdownMenuItem(value: "-", child: Text("Tire (-)")),
-                      DropdownMenuItem(value: "_", child: Text("Alt Çizgi (_)")),
-                      DropdownMenuItem(value: ".", child: Text("Nokta (.)")),
-                      DropdownMenuItem(value: " ", child: Text("Boşluk ( )")),
-                      DropdownMenuItem(value: "#", child: Text("Kare (#)")),
-                      DropdownMenuItem(value: "/", child: Text("Bölü (/)")),
-                    ],
-                    onChanged: (val) {
-                      if (val != null) {
-                        setState(() {
-                          _separator = val;
-                          _generate();
-                        });
-                      }
-                    },
+              ),
+              header,
+              const SizedBox(height: 12),
+              Flexible(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.sizeOf(context).height * 0.58,
                   ),
+                  child: contentBody,
                 ),
-              ] else ...[
-                // History Ring Buffer View (last 50 generations)
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      "Son Üretilen Şifreler (${PasswordGeneratorDialog.history.length}/${PasswordGeneratorDialog.maxHistorySize})",
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    if (PasswordGeneratorDialog.history.isNotEmpty)
-                      TextButton.icon(
-                        icon: const Icon(Icons.delete_sweep_outlined, size: 16),
-                        label: const Text("Temizle"),
-                        onPressed: () {
-                          setState(() {
-                            PasswordGeneratorDialog.clearHistory();
-                          });
-                        },
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                if (PasswordGeneratorDialog.history.isEmpty)
-                  Container(
-                    padding: const EdgeInsets.all(24),
-                    alignment: Alignment.center,
-                    child: Text(
-                      "Henüz kaydedilmiş üretim geçmişi yok.",
-                      style: TextStyle(color: Theme.of(context).colorScheme.outline),
-                    ),
-                  )
-                else
-                  SizedBox(
-                    height: 280,
-                    child: ListView.separated(
-                      shrinkWrap: true,
-                      itemCount: PasswordGeneratorDialog.history.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1),
-                      itemBuilder: (ctx, idx) {
-                        final record = PasswordGeneratorDialog.history[idx];
-                        return ListTile(
-                          dense: true,
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-                          title: SelectableText(
-                            record.password,
-                            style: const TextStyle(
-                              fontFamily: "monospace",
-                              fontWeight: FontWeight.bold,
-                              fontSize: 13,
-                            ),
-                          ),
-                          subtitle: Text(
-                            "${record.mode == "passphrase" ? "Diceware" : "Karakter"} • ${record.entropyBits.toStringAsFixed(1)} bit",
-                            style: const TextStyle(fontSize: 11),
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                icon: const Icon(Icons.copy, size: 16),
-                                tooltip: "Kopyala",
-                                onPressed: () async {
-                                  int timeout = ClipboardService.defaultTimeoutSeconds;
-                                  try {
-                                    timeout = context.read<SettingsProvider>().clipboardTimeoutSeconds;
-                                  } catch (_) {}
-                                  await ClipboardService.copySecurely(
-                                    record.password,
-                                    timeoutSeconds: timeout,
-                                  );
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(content: Text("Geçmişteki şifre kopyalandı!")),
-                                    );
-                                  }
-                                },
-                              ),
-                              IconButton(
-                                icon: const Icon(Icons.check_circle_outline, size: 18),
-                                tooltip: "Seç",
-                                onPressed: () {
-                                  setState(() {
-                                    _generated = record.password;
-                                    _entropyBits = record.entropyBits;
-                                    _mode = record.mode == "passphrase" ? GeneratorMode.passphrase : GeneratorMode.password;
-                                  });
-                                },
-                              ),
-                            ],
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-              ],
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 8,
+                runSpacing: 8,
+                children: actionsRow,
+              ),
             ],
           ),
         ),
+      );
+    }
+
+    return AlertDialog(
+      title: header,
+      content: SizedBox(
+        width: 520,
+        child: contentBody,
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text("Vazgeç"),
-        ),
-        OutlinedButton.icon(
-          icon: const Icon(Icons.copy, size: 16),
-          label: Text(context.l10n.copy),
-          onPressed: () async {
-            if (_generated.isNotEmpty) {
-              int timeout = ClipboardService.defaultTimeoutSeconds;
-              try {
-                timeout =
-                    context.read<SettingsProvider>().clipboardTimeoutSeconds;
-              } catch (_) {}
-              await ClipboardService.copySecurely(
-                _generated,
-                timeoutSeconds: timeout,
-              );
-              if (context.mounted) {
-                final l10n = context.l10n;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      l10n.copiedWithTimeout(
-                        l10n.tr("Şifre", "Password"),
-                        timeout,
-                      ),
-                    ),
-                  ),
-                );
-              }
-            }
-          },
-        ),
-        FilledButton.icon(
-          icon: const Icon(Icons.check, size: 18),
-          label: const Text("Kullan"),
-          onPressed: () => Navigator.of(context).pop(_generated),
-        ),
-      ],
+      actions: actionsRow,
     );
   }
 }

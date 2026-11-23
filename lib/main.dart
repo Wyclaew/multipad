@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
+import 'constants.dart';
 import 'l10n/app_localizations.dart';
 import 'providers/auth_provider.dart';
 import 'providers/settings_provider.dart';
@@ -11,7 +13,9 @@ import 'screens/auth_screen.dart';
 import 'screens/home_screen.dart';
 import 'services/browser_bridge_service.dart';
 import 'services/native_bridge_service.dart';
+import 'services/pending_capture_coordinator.dart';
 import 'services/totp_ticker_service.dart';
+import 'widgets/desktop_title_bar.dart';
 import 'widgets/quick_search_dialog.dart';
 
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
@@ -37,29 +41,250 @@ class MultiPadApp extends StatelessWidget {
 
   ThemeData _buildTheme(Brightness brightness, {bool amoled = false}) {
     final isDark = brightness == Brightness.dark;
+
+    final primaryColor = isDark
+        ? AppThemeConstants.indigoDark
+        : AppThemeConstants.indigoLight;
+    final secondaryColor = isDark
+        ? AppThemeConstants.slateDark
+        : AppThemeConstants.slateLight;
+
+    final Color surfaceColor;
+    final Color surfaceLowest;
+    final Color surfaceLow;
+    final Color surfaceContainer;
+    final Color surfaceHigh;
+    final Color surfaceHighest;
+    final Color outlineVariantColor;
+    final Color scaffoldBg;
+
+    if (amoled) {
+      surfaceColor = AppThemeConstants.amoledSurface;
+      surfaceLowest = AppThemeConstants.amoledSurfaceContainerLowest;
+      surfaceLow = AppThemeConstants.amoledSurfaceContainerLow;
+      surfaceContainer = AppThemeConstants.amoledSurfaceContainer;
+      surfaceHigh = AppThemeConstants.amoledSurfaceContainerHigh;
+      surfaceHighest = AppThemeConstants.amoledSurfaceContainerHighest;
+      outlineVariantColor = AppThemeConstants.amoledOutlineVariant;
+      scaffoldBg = AppThemeConstants.amoledBg;
+    } else if (isDark) {
+      surfaceColor = AppThemeConstants.darkSurface;
+      surfaceLowest = AppThemeConstants.darkSurfaceContainerLowest;
+      surfaceLow = AppThemeConstants.darkSurfaceContainerLow;
+      surfaceContainer = AppThemeConstants.darkSurfaceContainer;
+      surfaceHigh = AppThemeConstants.darkSurfaceContainerHigh;
+      surfaceHighest = AppThemeConstants.darkSurfaceContainerHighest;
+      outlineVariantColor = AppThemeConstants.darkOutlineVariant;
+      scaffoldBg = AppThemeConstants.darkBg;
+    } else {
+      surfaceColor = AppThemeConstants.lightSurface;
+      surfaceLowest = AppThemeConstants.lightSurfaceContainerLowest;
+      surfaceLow = AppThemeConstants.lightSurfaceContainerLow;
+      surfaceContainer = AppThemeConstants.lightSurfaceContainer;
+      surfaceHigh = AppThemeConstants.lightSurfaceContainerHigh;
+      surfaceHighest = AppThemeConstants.lightSurfaceContainerHighest;
+      outlineVariantColor = AppThemeConstants.lightOutlineVariant;
+      scaffoldBg = AppThemeConstants.lightBg;
+    }
+
     final colorScheme = ColorScheme.fromSeed(
-      seedColor: isDark ? Colors.indigoAccent : Colors.indigo,
+      seedColor: primaryColor,
       brightness: brightness,
-      surface: amoled ? Colors.black : null,
+      primary: primaryColor,
+      secondary: secondaryColor,
+      surface: surfaceColor,
+      surfaceContainerLowest: surfaceLowest,
+      surfaceContainerLow: surfaceLow,
+      surfaceContainer: surfaceContainer,
+      surfaceContainerHigh: surfaceHigh,
+      surfaceContainerHighest: surfaceHighest,
+      outlineVariant: outlineVariantColor,
     );
 
     return ThemeData(
       colorScheme: colorScheme,
       useMaterial3: true,
-      scaffoldBackgroundColor: amoled ? Colors.black : null,
-      appBarTheme: amoled
-          ? const AppBarTheme(
-              backgroundColor: Colors.black,
-              surfaceTintColor: Colors.transparent,
-            )
-          : null,
+      scaffoldBackgroundColor: scaffoldBg,
+      appBarTheme: AppBarTheme(
+        backgroundColor: scaffoldBg,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        centerTitle: false,
+        titleTextStyle: TextStyle(
+          color: colorScheme.onSurface,
+          fontSize: 20,
+          fontWeight: FontWeight.w700,
+          letterSpacing: -0.4,
+        ),
+      ),
       cardTheme: CardThemeData(
         elevation: 0,
-        color: amoled ? const Color(0xFF0A0A0E) : null,
+        color: surfaceColor,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(
+            color: outlineVariantColor.withValues(alpha: 0.55),
+            width: 0.5,
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        margin: const EdgeInsets.only(bottom: 10),
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        fillColor: surfaceLow,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(
+            color: outlineVariantColor.withValues(alpha: 0.6),
+            width: 0.8,
+          ),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(
+            color: outlineVariantColor.withValues(alpha: 0.6),
+            width: 0.8,
+          ),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: primaryColor, width: 1.5),
+        ),
+        errorBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: colorScheme.error, width: 1.0),
+        ),
+        hintStyle: TextStyle(
+          color: colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+          fontSize: 14,
+        ),
+      ),
+      dialogTheme: DialogThemeData(
+        backgroundColor: amoled ? AppThemeConstants.amoledSurfaceContainerLow : surfaceColor,
+        elevation: 2,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: BorderSide(
+            color: outlineVariantColor.withValues(alpha: 0.4),
+            width: 0.5,
+          ),
+        ),
+        titleTextStyle: TextStyle(
+          color: colorScheme.onSurface,
+          fontSize: 18,
+          fontWeight: FontWeight.w700,
+        ),
+        contentTextStyle: TextStyle(
+          color: colorScheme.onSurfaceVariant,
+          fontSize: 14,
+        ),
+      ),
+      bottomSheetTheme: BottomSheetThemeData(
+        backgroundColor: amoled ? AppThemeConstants.amoledSurfaceContainerLow : surfaceColor,
+        surfaceTintColor: Colors.transparent,
+        modalBackgroundColor: amoled ? AppThemeConstants.amoledSurfaceContainerLow : surfaceColor,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        clipBehavior: Clip.antiAlias,
+        showDragHandle: true,
+        dragHandleColor: outlineVariantColor,
+      ),
+      chipTheme: ChipThemeData(
+        backgroundColor: surfaceLow,
+        selectedColor: colorScheme.primaryContainer,
+        side: BorderSide(
+          color: outlineVariantColor.withValues(alpha: 0.5),
+          width: 0.5,
+        ),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+        ),
+        labelStyle: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w500,
+          color: colorScheme.onSurface,
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          side: BorderSide(color: outlineVariantColor),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+        ),
+      ),
+      textButtonTheme: TextButtonThemeData(
+        style: TextButton.styleFrom(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+        ),
+      ),
+      dividerTheme: DividerThemeData(
+        color: outlineVariantColor.withValues(alpha: 0.4),
+        thickness: 0.5,
+        space: 1,
+      ),
+      navigationBarTheme: NavigationBarThemeData(
+        backgroundColor: amoled ? Colors.black : surfaceLow,
+        indicatorColor: colorScheme.primaryContainer,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        labelTextStyle: WidgetStateProperty.resolveWith((states) {
+          final isSelected = states.contains(WidgetState.selected);
+          return TextStyle(
+            fontSize: 12,
+            fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+            color: isSelected ? colorScheme.primary : colorScheme.onSurfaceVariant,
+          );
+        }),
+      ),
+      textTheme: TextTheme(
+        headlineMedium: TextStyle(
+          color: colorScheme.onSurface,
+          fontWeight: FontWeight.w700,
+          letterSpacing: -0.5,
+        ),
+        titleLarge: TextStyle(
+          color: colorScheme.onSurface,
+          fontWeight: FontWeight.w700,
+          letterSpacing: -0.3,
+        ),
+        titleMedium: TextStyle(
+          color: colorScheme.onSurface,
+          fontWeight: FontWeight.w600,
+        ),
+        titleSmall: TextStyle(
+          color: colorScheme.onSurfaceVariant,
+          fontWeight: FontWeight.w600,
+        ),
+        bodyLarge: TextStyle(
+          color: colorScheme.onSurface,
+          fontSize: 15,
+        ),
+        bodyMedium: TextStyle(
+          color: colorScheme.onSurface,
+          fontSize: 14,
+        ),
+        bodySmall: TextStyle(
+          color: colorScheme.onSurfaceVariant,
+          fontSize: 12,
+        ),
+        labelLarge: TextStyle(
+          color: colorScheme.onSurface,
+          fontWeight: FontWeight.w600,
+          fontSize: 14,
+        ),
       ),
     );
   }
@@ -156,12 +381,26 @@ class MultiPadApp extends StatelessWidget {
             ],
             builder: (context, child) {
               final media = MediaQuery.of(context);
+              final isDesktop =
+                  !kIsWeb && (Platform.isMacOS || Platform.isWindows);
+
               return MediaQuery(
                 data: media.copyWith(
                   textScaler: TextScaler.linear(settings.fontScale),
                 ),
                 child: VaultLifecycleShell(
-                  child: child ?? const SizedBox.shrink(),
+                  child: isDesktop
+                      ? Scaffold(
+                          body: Column(
+                            children: [
+                              const DesktopTitleBar(),
+                              Expanded(
+                                child: child ?? const SizedBox.shrink(),
+                              ),
+                            ],
+                          ),
+                        )
+                      : (child ?? const SizedBox.shrink()),
                 ),
               );
             },
@@ -209,6 +448,7 @@ class VaultLifecycleShellState extends State<VaultLifecycleShell>
         await context.read<VaultProvider>().saveItem(item);
       },
     );
+    BrowserBridgeService.instance = _browserBridge;
     _browserBridge!.start().catchError((e) {
       debugPrint('BrowserBridgeService startup notice: $e');
     });
@@ -238,10 +478,23 @@ class VaultLifecycleShellState extends State<VaultLifecycleShell>
       if (_wasUnlocked && !auth.isUnlocked) {
         rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
       }
+      final bool justUnlocked = !_wasUnlocked && auth.isUnlocked;
       _lastTimeoutMinutes = settings.autoLockMinutes;
       _wasUnlocked = auth.isUnlocked;
       _resetInactivityTimer();
+
+      if (justUnlocked) {
+        final ctx = rootNavigatorKey.currentContext;
+        if (ctx != null) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (ctx.mounted) {
+              PendingCaptureCoordinator.checkAndShow(ctx);
+            }
+          });
+        }
+      }
     }
+
   }
 
   @override
@@ -315,6 +568,10 @@ class VaultLifecycleShellState extends State<VaultLifecycleShell>
       TotpTickerService.instance.resume();
       auth.notifyAppResumed();
       _resetInactivityTimer();
+      final ctx = rootNavigatorKey.currentContext;
+      if (ctx != null) {
+        PendingCaptureCoordinator.checkAndShow(ctx);
+      }
     } else if (state == AppLifecycleState.paused ||
                state == AppLifecycleState.hidden) {
       TotpTickerService.instance.pause();

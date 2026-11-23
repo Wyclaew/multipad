@@ -5,6 +5,7 @@ import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -245,7 +246,32 @@ class MainActivity : FlutterFragmentActivity() {
                                 setDataAndType(uri, "application/vnd.android.package-archive")
                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
                             }
+
+                            val resolveInfos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                packageManager.queryIntentActivities(
+                                    installIntent,
+                                    PackageManager.ResolveInfoFlags.of(
+                                        PackageManager.MATCH_DEFAULT_ONLY.toLong(),
+                                    ),
+                                )
+                            } else {
+                                @Suppress("DEPRECATION")
+                                packageManager.queryIntentActivities(
+                                    installIntent,
+                                    PackageManager.MATCH_DEFAULT_ONLY,
+                                )
+                            }
+
+                            for (resolveInfo in resolveInfos) {
+                                grantUriPermission(
+                                    resolveInfo.activityInfo.packageName,
+                                    uri,
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                                )
+                            }
+
                             startActivity(installIntent)
                             result.success(true)
                         } catch (e: Exception) {
