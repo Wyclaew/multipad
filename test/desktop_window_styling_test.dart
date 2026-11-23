@@ -22,11 +22,13 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     DesktopTitleBar.debugIsMacOS = null;
     DesktopTitleBar.debugIsWindows = null;
+    NativeBridgeService.debugIsDesktopOverride = true;
   });
 
   tearDown(() {
     DesktopTitleBar.debugIsMacOS = null;
     DesktopTitleBar.debugIsWindows = null;
+    NativeBridgeService.debugIsDesktopOverride = null;
     messenger.setMockMethodCallHandler(nativeChannel, null);
   });
 
@@ -347,6 +349,7 @@ void main() {
     setUp(() {
       DesktopTitleBar.debugIsMacOS = false;
       DesktopTitleBar.debugIsWindows = false;
+      NativeBridgeService.debugIsDesktopOverride = false;
     });
 
     testWidgets('renders SizedBox.shrink with 0 dimensions on non-desktop platforms', (tester) async {

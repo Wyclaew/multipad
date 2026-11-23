@@ -106,12 +106,22 @@ class NativeBridgeService {
     }
   }
 
+  /// Test override to simulate desktop platforms on Linux CI runners or headless tests.
+  @visibleForTesting
+  static bool? debugIsDesktopOverride;
+
+  /// Returns true if running on desktop (macOS, Windows, or Linux).
+  static bool get isDesktopPlatform =>
+      debugIsDesktopOverride ??
+      (!kIsWeb &&
+          (Platform.isMacOS || Platform.isWindows || Platform.isLinux));
+
   /// Configures macOS Menu Bar StatusItem / Windows System Tray + Global Hotkey (Cmd/Ctrl+Shift+Space).
   static Future<void> configureDesktopShell({
     required bool trayEnabled,
     required bool globalHotkeyEnabled,
   }) async {
-    if (kIsWeb || !(Platform.isMacOS || Platform.isWindows)) return;
+    if (!isDesktopPlatform) return;
     try {
       await _channel.invokeMethod('configureDesktopShell', {
         'trayEnabled': trayEnabled,
@@ -126,7 +136,7 @@ class NativeBridgeService {
 
   /// Brings app window forward cleanly when triggered via tray/hotkey.
   static Future<void> bringWindowToFront() async {
-    if (kIsWeb || !(Platform.isMacOS || Platform.isWindows)) return;
+    if (!isDesktopPlatform) return;
     try {
       await _channel.invokeMethod('bringWindowToFront');
     } on MissingPluginException {
@@ -138,7 +148,7 @@ class NativeBridgeService {
 
   /// Minimizes the desktop window.
   static Future<void> windowMinimize() async {
-    if (kIsWeb || !(Platform.isMacOS || Platform.isWindows)) return;
+    if (!isDesktopPlatform) return;
     try {
       await _channel.invokeMethod('windowMinimize');
     } on MissingPluginException {
@@ -150,7 +160,7 @@ class NativeBridgeService {
 
   /// Toggles maximize / restore on the desktop window.
   static Future<void> windowMaximize() async {
-    if (kIsWeb || !(Platform.isMacOS || Platform.isWindows)) return;
+    if (!isDesktopPlatform) return;
     try {
       await _channel.invokeMethod('windowMaximize');
     } on MissingPluginException {
@@ -162,7 +172,7 @@ class NativeBridgeService {
 
   /// Closes the desktop window (honors tray preferences).
   static Future<void> windowClose() async {
-    if (kIsWeb || !(Platform.isMacOS || Platform.isWindows)) return;
+    if (!isDesktopPlatform) return;
     try {
       await _channel.invokeMethod('windowClose');
     } on MissingPluginException {
@@ -174,7 +184,7 @@ class NativeBridgeService {
 
   /// Checks if the desktop window is currently maximized.
   static Future<bool> isWindowMaximized() async {
-    if (kIsWeb || !(Platform.isMacOS || Platform.isWindows)) return false;
+    if (!isDesktopPlatform) return false;
     try {
       final res = await _channel.invokeMethod<bool>('isWindowMaximized');
       return res ?? false;
@@ -187,7 +197,7 @@ class NativeBridgeService {
 
   /// Initiates native window dragging on mouse down.
   static Future<void> windowStartDragging() async {
-    if (kIsWeb || !(Platform.isMacOS || Platform.isWindows)) return;
+    if (!isDesktopPlatform) return;
     try {
       await _channel.invokeMethod('windowStartDragging');
     } on MissingPluginException {
