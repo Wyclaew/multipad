@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
@@ -381,8 +380,7 @@ class MultiPadApp extends StatelessWidget {
             ],
             builder: (context, child) {
               final media = MediaQuery.of(context);
-              final isDesktop =
-                  !kIsWeb && (Platform.isMacOS || Platform.isWindows);
+              final isDesktop = NativeBridgeService.isDesktopPlatform;
 
               return MediaQuery(
                 data: media.copyWith(
